@@ -1741,7 +1741,7 @@ show_installation_summary() {
             fi
         else
             echo "   ├── start_vllm_server.sh  # 服务器启动脚本"
-        }
+        fi
         echo "   └── test_model.py    # 模型测试脚本"
     else
         echo "   当前目录: $(pwd)/"
