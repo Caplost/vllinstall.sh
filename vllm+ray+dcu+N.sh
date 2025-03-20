@@ -1,24 +1,7 @@
-}
-
-# 添加一个安全执行的main函数包装器
-run_main() {
-    debug_log "开始执行main函数"
-    
-    # 尝试执行main函数
-    if ! main; then
-        print_error "主程序执行失败"
-        echo "请查看上面的错误信息，解决问题后重新运行"
-        exit 1
-    fi
-    
-    debug_log "main函数执行完成"
-}
-
-# 运行安全包装的main函数
-run_main#!/bin/bash
-# Rocky Linux系统vLLM+Ray分布式环境配置和检测脚本
-# 适用于Rocky Linux/CentOS系统安装和检测vLLM+Ray分布式运行环境
-# 增强版：支持检测和选择额外挂载磁盘用于存储大型模型数据，支持Ray分布式
+#!/bin/bash
+# Rocky Linux/CentOS vLLM + Ray环境配置和检测脚本
+# 适用于Rocky Linux/CentOS系统安装和检测vLLM运行环境
+# 支持检测和选择额外挂载磁盘用于存储大型模型数据
 #
 # 使用方法:
 #   1. 赋予脚本执行权限: chmod +x 此脚本.sh
@@ -26,12 +9,8 @@ run_main#!/bin/bash
 #   3. 按照交互提示操作
 #
 # 脚本执行完成后:
-#   - 主节点: ./start_ray_head.sh 启动Ray头节点
-#   - 从节点: ./start_ray_worker.sh <头节点IP>:<端口> 连接到头节点
-#   - 主节点: ./start_vllm_ray_server.sh 启动vLLM服务器(使用Ray集群)
-#   - 测试模型: python3 test_model.py --model 模型路径 测试模型
-#
-# 如果脚本中途退出，请检查错误信息并解决问题后重新运行
+#   - 使用 ./start_vllm_server.sh 启动vLLM服务器
+#   - 使用 python3 test_model.py --model 模型路径 测试模型
 
 set -e  # 遇到错误立即退出
 
@@ -43,7 +22,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # 恢复默认颜色
 
 # 配置文件路径
-CONFIG_FILE="$HOME/.vllm_ray_config.conf"
+CONFIG_FILE="$HOME/.vllm_config.conf"
 
 # 打印带有颜色的信息
 print_info() {
@@ -72,7 +51,7 @@ handle_error() {
     print_error "请检查上面的错误信息，解决问题后重新运行脚本"
     echo ""
     echo "如果您已经完成了部分配置，可以尝试:"
-    echo "1. 如果已安装vLLM: 直接运行 ./start_ray_head.sh 和 ./start_vllm_ray_server.sh (如果已生成)"
+    echo "1. 如果已安装vLLM: 直接运行 ./start_vllm_server.sh (如果已生成)"
     echo "2. 如果已下载模型: 使用 python3 test_model.py --model 模型路径 测试模型"
     echo ""
     exit 1
@@ -177,7 +156,7 @@ check_root() {
     fi
     
     # 检查必要的命令是否存在
-    for cmd in python3 pip3 df grep awk; do
+    for cmd in python3 grep awk; do
         if ! command -v $cmd &> /dev/null; then
             print_error "未找到必要的命令: $cmd"
             print_info "尝试安装必要的依赖..."
@@ -185,8 +164,12 @@ check_root() {
                 print_error "安装依赖需要root权限，请使用sudo运行此脚本"
                 exit 1
             fi
-            # Rocky Linux/CentOS使用dnf/yum而非apt
-            dnf update -y && dnf install -y python3 python3-pip python3-devel curl wget
+            # Rocky Linux/CentOS使用dnf或yum包管理器
+            if command -v dnf &> /dev/null; then
+                dnf -y update && dnf -y install python3 python3-pip curl wget
+            else
+                yum -y update && yum -y install python3 python3-pip curl wget
+            fi
             if ! command -v $cmd &> /dev/null; then
                 print_error "安装依赖后仍未找到命令: $cmd"
                 print_info "请手动安装所需的依赖后重试"
@@ -202,13 +185,13 @@ check_system() {
     
     # 检查Rocky Linux/CentOS版本
     if [ -f /etc/rocky-release ]; then
-        os_version=$(cat /etc/rocky-release)
-        print_info "Rocky Linux版本: $os_version"
+        ROCKY_VERSION=$(cat /etc/rocky-release)
+        print_info "Rocky Linux版本: $ROCKY_VERSION"
     elif [ -f /etc/centos-release ]; then
-        os_version=$(cat /etc/centos-release)
-        print_info "CentOS版本: $os_version"
+        CENTOS_VERSION=$(cat /etc/centos-release)
+        print_info "CentOS版本: $CENTOS_VERSION"
     else
-        print_warning "未检测到Rocky Linux或CentOS，此脚本可能不适用于当前系统"
+        print_warning "未检测到Rocky Linux或CentOS系统"
     fi
     
     # 检查CPU信息
@@ -231,50 +214,6 @@ check_system() {
     print_info "根分区总量: $disk_total"
     print_info "根分区已用空间: $disk_used"
     print_info "根分区可用空间: $disk_avail"
-    
-    # 检查网络配置 (Ray集群需要)
-    print_info "网络配置:"
-    hostname=$(hostname)
-    print_info "主机名: $hostname"
-    
-    # 获取IP地址 (仅IPv4)
-    ip_addresses=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1')
-    print_info "IPv4地址:"
-    echo "$ip_addresses"
-    
-    # 检查防火墙状态
-    if command -v firewall-cmd &> /dev/null; then
-        firewall_status=$(firewall-cmd --state 2>/dev/null || echo "未运行")
-        print_info "防火墙状态: $firewall_status"
-        if [ "$firewall_status" = "running" ]; then
-            print_warning "防火墙正在运行，可能需要开放Ray所需端口"
-            print_info "建议开放以下端口用于Ray集群通信:"
-            print_info "  - 6379: Redis (用于Ray头节点)"
-            print_info "  - 10001: Ray头节点gRPC服务器"
-            print_info "  - 8265: Ray仪表板"
-            print_info "  - 8000: vLLM API服务器"
-            print_info "可使用以下命令开放端口:"
-            print_info "  sudo firewall-cmd --permanent --add-port=6379/tcp"
-            print_info "  sudo firewall-cmd --permanent --add-port=10001/tcp"
-            print_info "  sudo firewall-cmd --permanent --add-port=8265/tcp"
-            print_info "  sudo firewall-cmd --permanent --add-port=8000/tcp"
-            print_info "  sudo firewall-cmd --reload"
-        fi
-    else
-        print_info "未检测到firewalld服务"
-    fi
-    
-    # 检查SELinux
-    if command -v getenforce &> /dev/null; then
-        selinux_status=$(getenforce)
-        print_info "SELinux状态: $selinux_status"
-        if [ "$selinux_status" = "Enforcing" ]; then
-            print_warning "SELinux处于强制模式，可能会影响Ray集群通信"
-            print_info "建议设置为Permissive模式:"
-            print_info "  sudo setenforce 0"
-            print_info "要永久修改，编辑 /etc/selinux/config 文件"
-        fi
-    fi
 }
 
 # 检测所有挂载的磁盘并让用户选择
@@ -410,8 +349,8 @@ detect_storage_disks() {
             create_subdir=${create_subdir:-y}
             
             if [[ $create_subdir =~ ^[Yy]$ ]]; then
-                read -p "请输入子目录名称 [vllm-ray-data]: " subdir_name
-                subdir_name=${subdir_name:-vllm-ray-data}
+                read -p "请输入子目录名称 [vllm-data]: " subdir_name
+                subdir_name=${subdir_name:-vllm-data}
                 
                 if mkdir -p "$SELECTED_DISK_PATH/$subdir_name" 2>/dev/null; then
                     SELECTED_DISK_PATH="$SELECTED_DISK_PATH/$subdir_name"
@@ -430,7 +369,7 @@ detect_storage_disks() {
     # 创建vLLM数据目录
     if [ "$SELECTED_DISK_PATH" != "$(pwd)" ]; then
         # 在选定的磁盘上创建vLLM数据目录
-        vllm_data_dir="$SELECTED_DISK_PATH/vllm-ray-data"
+        vllm_data_dir="$SELECTED_DISK_PATH/vllm-data"
         
         if [ ! -d "$vllm_data_dir" ]; then
             print_info "在选定磁盘上创建vLLM数据目录: $vllm_data_dir"
@@ -470,6 +409,64 @@ detect_storage_disks() {
     return 0
 }
 
+# 安装NVIDIA驱动和CUDA
+install_nvidia_drivers() {
+    print_section "NVIDIA驱动和CUDA安装"
+
+    # 检查是否已安装NVIDIA驱动
+    if command -v nvidia-smi &> /dev/null; then
+        print_info "NVIDIA驱动已安装"
+        nvidia-smi
+        return 0
+    fi
+
+    print_info "未检测到NVIDIA驱动，尝试安装..."
+    
+    # 检查是否为root用户
+    if [ "$EUID" -ne 0 ]; then
+        print_error "安装NVIDIA驱动需要root权限，请使用sudo运行此脚本"
+        return 1
+    fi
+    
+    # 添加NVIDIA仓库
+    print_info "添加NVIDIA仓库..."
+    
+    # 安装EPEL仓库
+    if command -v dnf &> /dev/null; then
+        dnf -y install epel-release
+        dnf -y install dnf-plugins-core
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+    else
+        yum -y install epel-release
+        yum -y install yum-utils
+        yum-config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+    fi
+    
+    # 安装必要的依赖
+    print_info "安装必要依赖..."
+    if command -v dnf &> /dev/null; then
+        dnf -y install kernel-devel kernel-headers gcc make dkms
+        dnf -y install cuda cuda-drivers
+    else
+        yum -y install kernel-devel kernel-headers gcc make dkms
+        yum -y install cuda cuda-drivers
+    fi
+    
+    print_info "NVIDIA驱动和CUDA安装完成，需要重启系统以加载驱动"
+    read -p "现在重启系统? (y/n) [n]: " reboot_now
+    reboot_now=${reboot_now:-n}
+    
+    if [[ $reboot_now =~ ^[Yy]$ ]]; then
+        print_info "系统将在5秒后重启..."
+        sleep 5
+        reboot
+    else
+        print_warning "请稍后手动重启系统以完成驱动安装"
+    fi
+    
+    return 0
+}
+
 # 检查GPU和CUDA
 check_gpu() {
     print_section "GPU和CUDA检查"
@@ -496,14 +493,16 @@ check_gpu() {
         driver_version=$(nvidia-smi | grep "Driver Version" | awk '{print $3}')
         print_info "NVIDIA驱动版本: $driver_version"
     else
-        print_error "未安装nvidia-smi，无法检测GPU信息"
-        print_info "您可以尝试安装NVIDIA驱动:"
-        print_info "  sudo dnf install -y epel-release"
-        print_info "  sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo"
-        print_info "  sudo dnf -y module install nvidia-driver:latest-dkms"
-        print_info "  sudo dnf -y install cuda"
-        print_info "安装后需要重启系统"
-        return 1
+        print_warning "未安装NVIDIA驱动，是否要安装?"
+        read -p "安装NVIDIA驱动和CUDA? (y/n) [y]: " install_drivers
+        install_drivers=${install_drivers:-y}
+        
+        if [[ $install_drivers =~ ^[Yy]$ ]]; then
+            install_nvidia_drivers
+        else
+            print_warning "跳过NVIDIA驱动安装，但vLLM需要NVIDIA GPU才能运行"
+            return 1
+        fi
     fi
     
     # 检查CUDA_HOME环境变量
@@ -511,6 +510,18 @@ check_gpu() {
         print_info "CUDA_HOME: $CUDA_HOME"
     else
         print_warning "CUDA_HOME环境变量未设置"
+        # 尝试设置CUDA_HOME
+        if [ -d "/usr/local/cuda" ]; then
+            export CUDA_HOME=/usr/local/cuda
+            print_info "已自动设置CUDA_HOME为: $CUDA_HOME"
+            
+            # 添加到~/.bashrc
+            if ! grep -q "CUDA_HOME=/usr/local/cuda" ~/.bashrc; then
+                echo "export CUDA_HOME=/usr/local/cuda" >> ~/.bashrc
+                echo "export PATH=\$PATH:\$CUDA_HOME/bin" >> ~/.bashrc
+                print_info "已将CUDA_HOME添加到~/.bashrc"
+            fi
+        fi
     fi
     
     # 检查nvcc
@@ -519,8 +530,19 @@ check_gpu() {
         print_info "NVCC版本: $nvcc_version"
     else
         print_warning "未找到nvcc，可能未安装CUDA工具包"
-        print_info "您可以尝试安装CUDA工具包:"
-        print_info "  sudo dnf -y install cuda-toolkit"
+        # 尝试安装CUDA工具包
+        if [ "$EUID" -eq 0 ]; then
+            if command -v dnf &> /dev/null; then
+                print_info "安装CUDA工具包..."
+                dnf -y install cuda-toolkit
+            else
+                print_info "安装CUDA工具包..."
+                yum -y install cuda-toolkit
+            fi
+        else
+            print_info "需要root权限安装CUDA工具包:"
+            print_info "  sudo dnf install -y cuda-toolkit  # 或 sudo yum install -y cuda-toolkit"
+        fi
     fi
 }
 
@@ -545,11 +567,20 @@ check_python() {
             
             # 如果是root用户，尝试安装Python 3.8
             if [ "$EUID" -eq 0 ]; then
-                dnf install -y python38 python38-devel python38-pip
+                if command -v dnf &> /dev/null; then
+                    dnf -y install python3.8 python3.8-devel python3.8-pip
+                else
+                    # 对于CentOS，可能需要启用SCL仓库
+                    yum -y install centos-release-scl
+                    yum -y install rh-python38 rh-python38-python-devel rh-python38-python-pip
+                    echo "source /opt/rh/rh-python38/enable" >> ~/.bashrc
+                    source /opt/rh/rh-python38/enable
+                fi
                 print_info "请重新运行脚本使用新安装的Python 3.8"
             else
                 print_info "需要root权限安装Python 3.8:"
-                print_info "  sudo dnf install -y python38 python38-devel python38-pip"
+                print_info "  对于Rocky Linux: sudo dnf install -y python3.8 python3.8-devel python3-pip"
+                print_info "  对于CentOS: sudo yum install -y centos-release-scl && sudo yum install -y rh-python38 rh-python38-python-devel"
             fi
         fi
     else
@@ -558,10 +589,14 @@ check_python() {
         
         # 如果是root用户，尝试安装Python 3
         if [ "$EUID" -eq 0 ]; then
-            dnf install -y python3 python3-devel python3-pip
+            if command -v dnf &> /dev/null; then
+                dnf -y install python3 python3-devel python3-pip
+            else
+                yum -y install python3 python3-devel python3-pip
+            fi
         else
             print_info "需要root权限安装Python 3:"
-            print_info "  sudo dnf install -y python3 python3-devel python3-pip"
+            print_info "  sudo dnf install -y python3 python3-devel python3-pip  # 或 sudo yum install -y ..."
             exit 1
         fi
     fi
@@ -572,10 +607,14 @@ check_python() {
         
         # 如果是root用户，尝试安装pip
         if [ "$EUID" -eq 0 ]; then
-            dnf install -y python3-pip
+            if command -v dnf &> /dev/null; then
+                dnf -y install python3-pip
+            else
+                yum -y install python3-pip
+            fi
         else
             print_info "需要root权限安装pip3:"
-            print_info "  sudo dnf install -y python3-pip"
+            print_info "  sudo dnf install -y python3-pip  # 或 sudo yum install -y python3-pip"
             exit 1
         fi
     fi
@@ -641,15 +680,26 @@ setup_virtualenv() {
         
         # 如果是root用户，直接安装venv
         if [ "$EUID" -eq 0 ]; then
-            dnf install -y python3-virtualenv python3-venv
+            if command -v dnf &> /dev/null; then
+                dnf -y install python3-venv
+            else
+                yum -y install python3-venv
+            fi
         else
             print_info "需要root权限安装venv模块:"
-            print_info "  sudo dnf install -y python3-virtualenv python3-venv"
+            print_info "  sudo dnf install -y python3-venv  # 或 sudo yum install -y python3-venv"
             # 尝试使用sudo安装
-            sudo dnf install -y python3-virtualenv python3-venv || {
-                print_error "安装venv模块失败，请手动安装后重试"
-                exit 1
-            }
+            if command -v dnf &> /dev/null; then
+                sudo dnf -y install python3-venv || {
+                    print_error "安装venv模块失败，请手动安装后重试"
+                    exit 1
+                }
+            else
+                sudo yum -y install python3-venv || {
+                    print_error "安装venv模块失败，请手动安装后重试"
+                    exit 1
+                }
+            fi
         fi
     fi
     
@@ -660,8 +710,8 @@ setup_virtualenv() {
     fi
     
     # 询问虚拟环境名称和位置
-    read -p "请输入虚拟环境名称 [vllm-ray-env]: " venv_name
-    venv_name=${venv_name:-vllm-ray-env}  # 默认为vllm-ray-env
+    read -p "请输入虚拟环境名称 [vllm-env]: " venv_name
+    venv_name=${venv_name:-vllm-env}  # 默认为vllm-env
     
     # 使用选定的磁盘路径作为虚拟环境的基础路径
     if [ -n "$SELECTED_DISK_PATH" ] && [ "$SELECTED_DISK_PATH" != "$(pwd)" ]; then
@@ -776,17 +826,6 @@ check_pip_packages() {
             TORCH_CUDA_ERROR=1
         fi
     fi
-    
-    # 检查Ray是否已安装并正常工作
-    if pip list 2>/dev/null | grep -q "^ray "; then
-        print_info "检查Ray..."
-        if python3 -c "import ray; print(f'Ray版本: {ray.__version__}')" 2>/dev/null; then
-            print_success "Ray检查完成"
-        else
-            print_error "Ray安装异常"
-            RAY_ERROR=1
-        fi
-    fi
 }
 
 # 选择镜像站点
@@ -858,8 +897,8 @@ select_mirror() {
 }
 
 # 安装vLLM和Ray
-install_vllm() {
-    print_section "vLLM + Ray 安装"
+install_vllm_ray() {
+    print_section "vLLM和Ray安装"
     
     # 确保虚拟环境已激活（如果有）
     if [ -n "$VENV_PATH" ] && [ -z "$VENV_ACTIVE" ]; then
@@ -887,11 +926,11 @@ install_vllm() {
     fi
     
     print_info "安装Ray..."
-    pip install ray
+    pip install ray[default]
     
     if [ $? -ne 0 ]; then
         print_error "Ray安装失败，尝试使用国内镜像..."
-        pip install ray -i https://pypi.tuna.tsinghua.edu.cn/simple
+        pip install ray[default] -i https://pypi.tuna.tsinghua.edu.cn/simple
         
         if [ $? -ne 0 ]; then
             print_error "Ray安装失败，请手动安装后继续"
@@ -918,18 +957,19 @@ install_vllm() {
     fi
     
     # 验证安装
+    print_info "验证安装..."
+    
     if pip list 2>/dev/null | grep -q "^vllm "; then
-        version=$(pip list 2>/dev/null | grep "^vllm " | awk '{print $2}')
-        print_success "vLLM已安装，版本: $version"
+        vllm_version=$(pip list 2>/dev/null | grep "^vllm " | awk '{print $2}')
+        print_success "vLLM已安装，版本: $vllm_version"
     else
         print_error "vLLM安装验证失败"
         return 1
     fi
     
-    # 验证Ray安装
     if pip list 2>/dev/null | grep -q "^ray "; then
-        version=$(pip list 2>/dev/null | grep "^ray " | awk '{print $2}')
-        print_success "Ray已安装，版本: $version"
+        ray_version=$(pip list 2>/dev/null | grep "^ray " | awk '{print $2}')
+        print_success "Ray已安装，版本: $ray_version"
     else
         print_error "Ray安装验证失败"
         return 1
@@ -1073,175 +1113,18 @@ download_model() {
     fi
 }
 
-# 生成Ray头节点启动脚本
-generate_ray_head_script() {
-    print_section "生成Ray头节点启动脚本"
-    
-    # 选择输出目录
-    if [ -n "$SELECTED_DISK_PATH" ]; then
-        script_dir="$SELECTED_DISK_PATH"
-    else
-        script_dir="$(pwd)"
-    fi
-    
-    # 获取本机IP地址
-    local_ip=$(hostname -I | awk '{print $1}')
-    
-    # 询问Ray头节点端口
-    read -p "输入Ray头节点端口 [6379]: " ray_head_port
-    ray_head_port=${ray_head_port:-6379}
-    
-    # 生成Ray头节点启动脚本
-    script_name="$script_dir/start_ray_head.sh"
-    
-    cat > "$script_name" << EOF
-#!/bin/bash
-# Ray头节点启动脚本 - 由自动配置工具生成
-
-# 获取本机IP
-LOCAL_IP=\$(hostname -I | awk '{print \$1}')
-if [ -z "\$LOCAL_IP" ]; then
-    LOCAL_IP="127.0.0.1"
-    echo "警告: 无法获取局域网IP，使用本地回环地址"
-fi
-
-# 设置Ray头节点地址
-export RAY_HEAD_IP=\${LOCAL_IP}
-export RAY_HEAD_PORT=${ray_head_port}
-
-# 如果提供了IP参数，使用该IP
-if [ -n "\$1" ]; then
-    export RAY_HEAD_IP="\$1"
-    echo "使用指定的IP地址: \$RAY_HEAD_IP"
-fi
-
-EOF
-    
-    # 如果使用虚拟环境，添加激活代码
-    if [ -n "$VENV_ACTIVE" ] && [ -n "$VENV_PATH" ]; then
-        cat >> "$script_name" << EOF
-# 激活Python虚拟环境
-echo "激活虚拟环境: $VENV_PATH"
-source "$VENV_PATH/bin/activate"
-
-EOF
-    fi
-    
-    # 添加主要启动命令
-    cat >> "$script_name" << EOF
-# 启动Ray头节点
-echo "启动Ray头节点 \$RAY_HEAD_IP:$ray_head_port..."
-ray start --head --node-ip-address=\$RAY_HEAD_IP --port=$ray_head_port --dashboard-host=0.0.0.0 --dashboard-port=8265
-
-# 显示Ray信息
-ray_address="ray://\$RAY_HEAD_IP:${ray_head_port}"
-echo ""
-echo "Ray头节点已启动!"
-echo "头节点地址: \$ray_address"
-echo "仪表板地址: http://\$RAY_HEAD_IP:8265"
-echo ""
-echo "工作节点可以使用以下命令连接到此头节点:"
-echo "./start_ray_worker.sh \$RAY_HEAD_IP:${ray_head_port}"
-echo ""
-echo "启动vLLM服务使用:"
-echo "./start_vllm_ray_server.sh"
-EOF
-    
-    chmod +x "$script_name"
-    print_success "Ray头节点启动脚本已生成: $script_name"
-    
-    # 创建快捷方式
-    if [ "$script_dir" != "$(pwd)" ]; then
-        ln -sf "$script_name" "./start_ray_head.sh" 2>/dev/null || true
-        print_info "在当前目录创建了头节点启动脚本的快捷方式"
-    fi
-    
-    # 保存Ray头节点端口
-    save_config "RAY_HEAD_PORT" "$ray_head_port"
-}
-
-# 生成Ray工作节点启动脚本
-generate_ray_worker_script() {
-    print_section "生成Ray工作节点启动脚本"
-    
-    # 选择输出目录
-    if [ -n "$SELECTED_DISK_PATH" ]; then
-        script_dir="$SELECTED_DISK_PATH"
-    else
-        script_dir="$(pwd)"
-    fi
-    
-    # 使用保存的Ray头节点端口或默认6379
-    ray_head_port=$(read_config "RAY_HEAD_PORT" "6379")
-    
-    # 生成Ray工作节点启动脚本
-    script_name="$script_dir/start_ray_worker.sh"
-    
-    cat > "$script_name" << EOF
-#!/bin/bash
-# Ray工作节点启动脚本 - 由自动配置工具生成
-
-# 检查参数
-if [ -z "\$1" ]; then
-    echo "错误: 未提供Ray头节点地址"
-    echo "用法: \$0 <头节点IP>:<端口>"
-    echo "示例: \$0 192.168.1.100:6379"
-    exit 1
-fi
-
-# 解析头节点地址
-RAY_HEAD_ADDR="\$1"
-
-EOF
-    
-    # 如果使用虚拟环境，添加激活代码
-    if [ -n "$VENV_ACTIVE" ] && [ -n "$VENV_PATH" ]; then
-        cat >> "$script_name" << EOF
-# 激活Python虚拟环境
-echo "激活虚拟环境: $VENV_PATH"
-source "$VENV_PATH/bin/activate"
-
-EOF
-    fi
-    
-    # 添加主要启动命令
-    cat >> "$script_name" << EOF
-# 启动Ray工作节点
-echo "连接到Ray头节点: \$RAY_HEAD_ADDR..."
-ray start --address="\$RAY_HEAD_ADDR" --dashboard-host=0.0.0.0 --dashboard-port=8266
-
-# 显示Ray信息
-echo ""
-echo "Ray工作节点已启动并连接到头节点: \$RAY_HEAD_ADDR"
-echo "本地仪表板地址: http://localhost:8266"
-EOF
-    
-    chmod +x "$script_name"
-    print_success "Ray工作节点启动脚本已生成: $script_name"
-    
-    # 创建快捷方式
-    if [ "$script_dir" != "$(pwd)" ]; then
-        ln -sf "$script_name" "./start_ray_worker.sh" 2>/dev/null || true
-        print_info "在当前目录创建了工作节点启动脚本的快捷方式"
-    fi
-}
-
 # 生成vLLM+Ray启动脚本
-generate_vllm_ray_server_script() {
-    print_section "生成vLLM+Ray服务器启动脚本"
+generate_startup_script() {
+    print_section "生成启动脚本"
     
-    # 选择输出目录
-    if [ -n "$SELECTED_DISK_PATH" ]; then
-        script_dir="$SELECTED_DISK_PATH"
+    # 检测GPU数量
+    if command -v nvidia-smi &> /dev/null; then
+        gpu_count=$(nvidia-smi -L | wc -l)
+        print_info "检测到 $gpu_count 个GPU"
     else
-        script_dir="$(pwd)"
+        gpu_count=1
+        print_warning "无法检测GPU数量，默认设置为1"
     fi
-    
-    # 获取本机IP地址
-    local_ip=$(hostname -I | awk '{print $1}')
-    
-    # 使用保存的Ray头节点端口或默认6379
-    ray_head_port=$(read_config "RAY_HEAD_PORT" "6379")
     
     # 检测是否存在已下载的模型
     if [ -n "$DOWNLOADED_MODEL" ]; then
@@ -1290,42 +1173,22 @@ generate_vllm_ray_server_script() {
         quant_option=""
     fi
     
-    # 节点分配选项
-    read -p "是否分配给所有Ray节点 (全局) 使用? (y/n) [y]: " use_global
-    use_global=${use_global:-y}
-    
-    if [[ $use_global =~ ^[Yy]$ ]]; then
-        resources_option=""
+    # 选择输出目录
+    if [ -n "$SELECTED_DISK_PATH" ]; then
+        script_dir="$SELECTED_DISK_PATH"
     else
-        resources_option="--distributed-worker-params=resources={\\\"head\\\": 1}"
-        print_info "仅在头节点上运行vLLM"
+        script_dir="$(pwd)"
     fi
     
-    # 生成vLLM+Ray启动脚本
-    script_name="$script_dir/start_vllm_ray_server.sh"
+    script_name="$script_dir/start_vllm_server.sh"
     
+    # 生成启动脚本内容
     cat > "$script_name" << EOF
 #!/bin/bash
-# vLLM+Ray服务器启动脚本 - 由自动配置工具生成
+# vLLM+Ray启动脚本 - 由自动配置工具生成
 
-# 设置Ray地址
-export RAY_HEAD_IP=\$(hostname -I | awk '{print \$1}')
-if [ -z "\$RAY_HEAD_IP" ]; then
-    RAY_HEAD_IP="127.0.0.1"
-    echo "警告: 无法获取局域网IP，使用本地回环地址"
-fi
-
-export RAY_ADDRESS="ray://\$RAY_HEAD_IP:${ray_head_port}"
-
-# 检查Ray集群状态
-echo "检查Ray集群状态..."
-if ! ray status --address="\$RAY_ADDRESS" &> /dev/null; then
-    echo "无法连接到Ray集群，请先启动Ray头节点:"
-    echo "./start_ray_head.sh"
-    exit 1
-fi
-
-echo "Ray集群已连接: \$RAY_ADDRESS"
+# 设置环境变量
+export CUDA_VISIBLE_DEVICES=0,1,2,3  # 根据实际GPU数量调整
 
 EOF
     
@@ -1339,22 +1202,61 @@ source "$VENV_PATH/bin/activate"
 EOF
     fi
     
-    # 添加主要启动命令
+    # 添加启动选项
     cat >> "$script_name" << EOF
-# 启动vLLM服务器 (使用Ray)
-echo "启动vLLM+Ray服务器..."
-python -m vllm.entrypoints.openai.api_server \\
-    --model $model_path \\
-    $quant_option \\
-    --trust-remote-code \\
-    --host 0.0.0.0 \\
-    --port 8000 \\
-    --ray-address="\$RAY_ADDRESS" \\
-    $resources_option
+# 选择启动模式
+echo "请选择启动模式:"
+echo "1) 使用vLLM原生服务器"
+echo "2) 使用vLLM+Ray服务器 (分布式支持)"
+read -p "选择模式 [2]: " mode
+mode=\${mode:-2}
+
+case \$mode in
+    1)
+        echo "启动vLLM原生服务器..."
+        python -m vllm.entrypoints.openai.api_server \\
+            --model $model_path \\
+            --tensor-parallel-size $gpu_count \\
+            $quant_option \\
+            --trust-remote-code \\
+            --host 0.0.0.0 \\
+            --port 8000
+        ;;
+    2)
+        echo "启动vLLM+Ray服务器..."
+        python -m vllm.entrypoints.openai.api_server \\
+            --model $model_path \\
+            --tensor-parallel-size $gpu_count \\
+            $quant_option \\
+            --trust-remote-code \\
+            --host 0.0.0.0 \\
+            --port 8000 \\
+            --use-ray \\
+            --ray-workers 1  # 设置Ray worker数量
+        ;;
+    *)
+        echo "无效选择，默认使用vLLM+Ray服务器"
+        python -m vllm.entrypoints.openai.api_server \\
+            --model $model_path \\
+            --tensor-parallel-size $gpu_count \\
+            $quant_option \\
+            --trust-remote-code \\
+            --host 0.0.0.0 \\
+            --port 8000 \\
+            --use-ray \\
+            --ray-workers 1
+        ;;
+esac
+
+# 其他可选参数:
+# --max-model-len 2048             # 设置模型上下文长度
+# --gpu-memory-utilization 0.8     # 控制显存使用率
+# --disable-log-requests           # 禁用请求日志
+# --engine-use-ray                 # 使用Ray来并行Engine操作
 
 # 打印使用说明
 cat << "USAGE"
-vLLM+Ray服务器已启动!
+vLLM服务器已启动!
 
 可以通过以下方式测试:
 curl http://localhost:8000/v1/completions \\
@@ -1369,256 +1271,14 @@ USAGE
 EOF
     
     chmod +x "$script_name"
-    print_success "vLLM+Ray服务器启动脚本已生成: $script_name"
-    print_info "使用以下命令启动vLLM+Ray服务器:"
+    print_success "启动脚本已生成: $script_name"
+    print_info "使用以下命令启动vLLM服务器:"
     print_info "  $script_name"
     
     # 创建快捷方式
     if [ "$script_dir" != "$(pwd)" ]; then
-        ln -sf "$script_name" "./start_vllm_ray_server.sh" 2>/dev/null || true
-        print_info "在当前目录创建了vLLM+Ray服务器启动脚本的快捷方式"
-    fi
-}
-
-# 生成模型测试脚本
-generate_test_script() {
-    print_section "生成测试脚本"
-    
-    # 选择输出目录
-    if [ -n "$SELECTED_DISK_PATH" ]; then
-        script_dir="$SELECTED_DISK_PATH"
-    else
-        script_dir="$(pwd)"
-    fi
-    
-    script_name="$script_dir/test_model.py"
-    
-    cat > "$script_name" << EOF
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-模型测试脚本
-此脚本用于测试已安装的大语言模型，支持Ray分布式环境
-"""
-
-import argparse
-import ray
-from vllm import LLM, SamplingParams
-
-def test_model(model_path, prompt=None, use_ray=False, ray_address=None):
-    """测试模型推理"""
-    print(f"正在加载模型: {model_path}")
-    print("这可能需要几分钟时间...")
-    
-    # 如果使用Ray，初始化Ray
-    if use_ray:
-        if ray_address:
-            print(f"连接到Ray集群: {ray_address}")
-            ray.init(address=ray_address)
-        else:
-            print("初始化本地Ray环境")
-            ray.init()
-        
-        print("Ray状态:", ray.cluster_resources())
-    
-    # 初始化模型
-    model_kwargs = {
-        "model": model_path,
-        "trust_remote_code": True,
-        "tensor_parallel_size": 1  # 单GPU测试
-    }
-    
-    # 如果使用Ray，添加分布式参数
-    if use_ray:
-        model_kwargs["distributed_executor"] = "ray"
-    
-    model = LLM(**model_kwargs)
-    
-    if prompt is None:
-        prompt = "请简要介绍一下自己。"
-    
-    print(f"\n输入提示: {prompt}")
-    
-    # 定义采样参数
-    sampling_params = SamplingParams(
-        temperature=0.7,
-        top_p=0.9,
-        max_tokens=100
-    )
-    
-    # 运行推理
-    print("\n正在生成回复...")
-    outputs = model.generate([prompt], sampling_params)
-    
-    # 打印结果
-    print("\n模型回复:")
-    print("-" * 50)
-    for output in outputs:
-        print(output.text)
-    print("-" * 50)
-    
-    print("\n测试完成！")
-    
-    # 如果使用Ray，关闭Ray
-    if use_ray and ray.is_initialized():
-        ray.shutdown()
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="测试语言模型")
-    parser.add_argument("--model", type=str, required=True, help="模型路径或Hugging Face模型ID")
-    parser.add_argument("--prompt", type=str, help="测试提示 (可选)")
-    parser.add_argument("--use-ray", action="store_true", help="使用Ray进行分布式推理")
-    parser.add_argument("--ray-address", type=str, help="Ray集群地址 (例如 ray://192.168.1.100:6379)")
-    
-    args = parser.parse_args()
-    test_model(args.model, args.prompt, args.use_ray, args.ray_address)
-EOF
-    
-    chmod +x "$script_name"
-    print_success "测试脚本已生成: $script_name"
-    print_info "使用以下命令测试模型:"
-    print_info "  python3 $script_name --model 模型路径"
-    print_info "  python3 $script_name --model 模型路径 --use-ray --ray-address \"ray://192.168.1.100:6379\""
-    
-    # 创建快捷方式
-    if [ "$script_dir" != "$(pwd)" ]; then
-        ln -sf "$script_name" "./test_model.py" 2>/dev/null || true
-        print_info "在当前目录创建了测试脚本的快捷方式"
-    fi
-}
-
-# 生成分布式运行指南
-generate_distributed_guide() {
-    print_section "生成分布式部署指南"
-    
-    # 选择输出目录
-    if [ -n "$SELECTED_DISK_PATH" ]; then
-        guide_dir="$SELECTED_DISK_PATH"
-    else
-        guide_dir="$(pwd)"
-    fi
-    
-    guide_name="$guide_dir/ray_vllm_guide.md"
-    
-    cat > "$guide_name" << EOF
-# vLLM + Ray 分布式部署指南
-
-本指南提供了使用Ray和vLLM进行分布式大语言模型推理的详细步骤。
-
-## 系统架构
-
-* **Ray头节点**: 协调集群中的所有工作节点
-* **Ray工作节点**: 提供计算资源用于模型推理
-* **vLLM服务器**: 使用Ray集群进行分布式模型加载和推理
-
-## 部署流程
-
-### 1. 准备工作
-
-在所有节点上执行：
-
-1. 安装相同版本的Python、PyTorch、Ray和vLLM
-2. 确保所有节点之间可以通过网络互相访问
-3. 防火墙需要开放以下端口：
-   - 6379: Redis (用于Ray头节点)
-   - 10001: Ray头节点gRPC服务器
-   - 8265: Ray仪表板
-   - 8000: vLLM API服务器
-
-### 2. 启动Ray集群
-
-1. **在头节点上**:
-   ```bash
-   # 启动Ray头节点
-   ./start_ray_head.sh
-   ```
-
-2. **在每个工作节点上**:
-   ```bash
-   # 连接到头节点，替换IP_ADDRESS为头节点的实际IP
-   ./start_ray_worker.sh IP_ADDRESS:6379
-   ```
-
-3. **验证Ray集群**:
-   访问 http://头节点IP:8265 查看Ray仪表板
-
-### 3. 启动vLLM服务
-
-在头节点上:
-```bash
-# 启动vLLM服务器
-./start_vllm_ray_server.sh
-```
-
-### 4. 测试模型推理
-
-1. **测试API接口**:
-   ```bash
-   curl http://头节点IP:8000/v1/completions \\
-     -H "Content-Type: application/json" \\
-     -d '{
-       "model": "模型名称",
-       "prompt": "你好，请介绍自己",
-       "max_tokens": 100,
-       "temperature": 0.7
-     }'
-   ```
-
-2. **使用Python测试**:
-   ```bash
-   python3 test_model.py --model 模型路径 --use-ray --ray-address "ray://头节点IP:6379"
-   ```
-
-## 高级配置
-
-### 资源分配
-
-在vLLM服务器启动脚本中，可以调整以下参数:
-
-- **tensor-parallel-size**: 控制单个模型实例使用的GPU数量
-- **distributed-worker-params**: 指定资源分配策略
-
-### 模型分片与量化
-
-- 使用 \`--quantization awq\` 参数启用量化，降低显存需求
-- 对于大型模型，使用tensor-parallel参数跨多个GPU分片模型
-
-### 注意事项
-
-1. 确保所有节点使用相同的vLLM和Ray版本
-2. 模型应该可以从所有节点访问，建议使用共享存储或在每个节点上复制模型
-3. 监控Ray仪表板以确保资源分配合理
-4. 出现问题时检查Ray和vLLM的日志
-
-## 故障排除
-
-1. **无法连接到Ray集群**:
-   - 检查防火墙设置
-   - 确认IP地址配置正确
-   - 验证所有节点的时间同步
-
-2. **模型加载失败**:
-   - 确保模型路径正确且所有节点可访问
-   - 检查是否有足够的GPU内存
-
-3. **性能问题**:
-   - 调整tensor-parallel-size参数
-   - 考虑使用量化减少内存使用
-   - 监控网络带宽，可能成为瓶颈
-
-## 相关资源
-
-- [Ray 文档](https://docs.ray.io/)
-- [vLLM 文档](https://docs.vllm.ai/)
-- [分布式推理最佳实践](https://docs.vllm.ai/en/latest/serving/distributed_serving.html)
-EOF
-    
-    print_success "分布式部署指南已生成: $guide_name"
-    
-    # 创建快捷方式
-    if [ "$guide_dir" != "$(pwd)" ]; then
-        ln -sf "$guide_name" "./ray_vllm_guide.md" 2>/dev/null || true
-        print_info "在当前目录创建了部署指南的快捷方式"
+        ln -sf "$script_name" "./start_vllm_server.sh" 2>/dev/null || true
+        print_info "在当前目录创建了启动脚本的快捷方式"
     fi
 }
 
@@ -1645,7 +1305,6 @@ recommend_models() {
             echo "   - deepseek-ai/deepseek-llm-67b-base"
             echo "   - deepseek-ai/deepseek-llm-67b-chat"
             echo "   - meta-llama/Llama-2-70b-chat-hf"
-            echo "   * 使用Ray可以跨多个节点分布式运行更大的模型"
         elif (( $(echo "$total_vram_gb >= 40" | bc -l) )); then
             echo "✅ 您的系统可以运行中型模型 (如deepseek-llm-7b/13b)"
             echo "   - deepseek-ai/deepseek-llm-7b-base"
@@ -1653,26 +1312,27 @@ recommend_models() {
             echo "   - deepseek-ai/deepseek-coder-6.7b-instruct"
             echo "   - meta-llama/Llama-2-13b-chat-hf"
             echo "   * 使用量化可能可以运行deepseek-llm-67b"
-            echo "   * 使用Ray可以跨多个节点分布式运行更大的模型"
         elif (( $(echo "$total_vram_gb >= 20" | bc -l) )); then
             echo "✅ 您的系统可以运行小型模型 (如deepseek-llm-7b)"
             echo "   - deepseek-ai/deepseek-llm-7b-base (推荐)"
             echo "   - deepseek-ai/deepseek-llm-7b-chat" 
             echo "   - deepseek-ai/deepseek-coder-6.7b-instruct"
             echo "   * 建议启用量化选项 (--quantization awq)"
-            echo "   * 使用Ray可以跨多个节点分布式运行更大的模型"
         else
             echo "⚠️ 您的显存有限，建议使用小型模型"
             echo "   - TinyLlama/TinyLlama-1.1B-Chat-v1.0 (最小测试选项)"
             echo "   - deepseek-ai/deepseek-llm-7b-base (使用量化)"
             echo "   * 必须启用量化选项 (--quantization awq)"
             echo "   * 考虑减小上下文窗口 (--max-model-len 1024)"
-            echo "   * 在Ray集群中添加更多节点可以运行更大的模型"
         fi
         
         echo ""
+        echo "如果使用Ray分布式部署:"
+        echo "   - 可以在多个节点上部署vLLM服务器"
+        echo "   - 每个节点需要具有相同的模型配置"
+        echo "   - 建议在具有相同GPU配置的节点上部署"
+        echo ""
         echo "无论您的硬件配置如何，建议先使用TinyLlama-1.1B验证安装，然后再尝试更大的模型"
-        echo "对于分布式部署，添加更多具有GPU的节点可以显著提高性能"
     else
         print_error "无法检测GPU信息，跳过模型推荐"
     fi
@@ -1726,26 +1386,12 @@ show_installation_summary() {
     fi
     
     # 启动脚本状态
-    if [ -n "$SELECTED_DISK_PATH" ]; then
-        if [ -f "$SELECTED_DISK_PATH/start_ray_head.sh" ]; then
-            echo "✅ Ray头节点脚本已生成: $SELECTED_DISK_PATH/start_ray_head.sh"
-        fi
-        if [ -f "$SELECTED_DISK_PATH/start_ray_worker.sh" ]; then
-            echo "✅ Ray工作节点脚本已生成: $SELECTED_DISK_PATH/start_ray_worker.sh"
-        fi
-        if [ -f "$SELECTED_DISK_PATH/start_vllm_ray_server.sh" ]; then
-            echo "✅ vLLM+Ray服务器脚本已生成: $SELECTED_DISK_PATH/start_vllm_ray_server.sh"
-        fi
+    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/start_vllm_server.sh" ]; then
+        echo "✅ 启动脚本已生成: $SELECTED_DISK_PATH/start_vllm_server.sh"
+    elif [ -f "./start_vllm_server.sh" ]; then
+        echo "✅ 启动脚本已生成: ./start_vllm_server.sh"
     else
-        if [ -f "./start_ray_head.sh" ]; then
-            echo "✅ Ray头节点脚本已生成: ./start_ray_head.sh"
-        fi
-        if [ -f "./start_ray_worker.sh" ]; then
-            echo "✅ Ray工作节点脚本已生成: ./start_ray_worker.sh"
-        fi
-        if [ -f "./start_vllm_ray_server.sh" ]; then
-            echo "✅ vLLM+Ray服务器脚本已生成: ./start_vllm_ray_server.sh"
-        fi
+        echo "- 未生成启动脚本"
     fi
     
     print_section "详细安装指南"
@@ -1755,28 +1401,20 @@ show_installation_summary() {
     echo "   - 磁盘选择: 选择适合存储大模型的磁盘"
     echo "   - GPU检查: 验证GPU、驱动和CUDA"
     echo "   - Python环境: 设置虚拟环境隔离依赖"
-    echo "   - vLLM+Ray安装: 安装核心推理引擎和分布式框架"
+    echo "   - vLLM+Ray安装: 安装核心推理引擎及分布式支持"
     echo "   - 模型下载: 获取预训练的大语言模型"
-    echo "   - 脚本生成: 创建Ray集群和vLLM服务器启动脚本"
+    echo "   - 脚本生成: 创建启动和测试脚本"
     echo ""
     
-    echo "2. 分布式环境结构:"
+    echo "2. 环境结构:"
     if [ -n "$SELECTED_DISK_PATH" ]; then
         echo "   数据根目录: $SELECTED_DISK_PATH/"
-        echo "   ├── models/                # 存储下载的模型"
-        echo "   ├── start_ray_head.sh      # Ray头节点启动脚本"
-        echo "   ├── start_ray_worker.sh    # Ray工作节点启动脚本"
-        echo "   ├── start_vllm_ray_server.sh # vLLM+Ray服务器启动脚本"
-        echo "   ├── test_model.py          # 模型测试脚本"
-        echo "   └── ray_vllm_guide.md      # 分布式部署指南"
+        echo "   ├── models/          # 存储下载的模型"
+        echo "   ├── start_vllm_server.sh  # 服务器启动脚本"
     else
         echo "   当前目录: $(pwd)/"
-        echo "   ├── models/                # 存储下载的模型"
-        echo "   ├── start_ray_head.sh      # Ray头节点启动脚本"
-        echo "   ├── start_ray_worker.sh    # Ray工作节点启动脚本"
-        echo "   ├── start_vllm_ray_server.sh # vLLM+Ray服务器启动脚本"
-        echo "   ├── test_model.py          # 模型测试脚本"
-        echo "   └── ray_vllm_guide.md      # 分布式部署指南"
+        echo "   ├── models/          # 存储下载的模型"
+        echo "   ├── start_vllm_server.sh  # 服务器启动脚本"
     fi
     
     if [ -n "$VENV_PATH" ]; then
@@ -1786,41 +1424,53 @@ show_installation_summary() {
     fi
     echo ""
     
-    echo "3. 分布式部署步骤:"
-    echo "   第1步: 在所有节点上安装相同版本的依赖"
-    echo "     - 在每个节点上运行此脚本以安装vLLM和Ray"
+    echo "3. 使用vLLM+Ray服务的方式:"
+    echo "   A. 作为OpenAI兼容API服务器:"
+    echo "      - 启动服务器: ./start_vllm_server.sh (选择模式2使用Ray)"
+    echo "      - 服务器默认地址: http://localhost:8000"
+    echo "      - API格式与OpenAI兼容，支持completions和chat completions接口"
     echo ""
-    echo "   第2步: 启动Ray集群"
-    echo "     - 在头节点上: ./start_ray_head.sh"
-    echo "     - 在工作节点上: ./start_ray_worker.sh <头节点IP>:6379"
-    echo "     - 访问http://<头节点IP>:8265查看Ray仪表板"
-    echo ""
-    echo "   第3步: 启动vLLM服务"
-    echo "     - 在头节点上: ./start_vllm_ray_server.sh"
-    echo "     - 服务将在所有节点上分布式运行模型"
+    echo "   B. 直接在Python中使用vLLM+Ray:"
+    echo "      - 激活虚拟环境: source $VENV_PATH/bin/activate (如果使用了虚拟环境)"
+    echo "      - 创建Python脚本使用vLLM和Ray库:"
+    echo "        ```python"
+    echo "        from vllm import LLM, SamplingParams"
+    echo "        # 使用Ray"
+    echo "        model = LLM(model=\"模型路径\", use_ray=True, ray_workers=1)"
+    echo "        outputs = model.generate(\"你的提示\")"
+    echo "        print(outputs[0].text)"
+    echo "        ```"
     echo ""
     
     echo "4. 常见问题解决方案:"
     echo "   A. 内存不足:"
-    echo "      - 启用量化: 在start_vllm_ray_server.sh中添加 --quantization awq"
+    echo "      - 启用量化: 在start_vllm_server.sh中添加 --quantization awq"
     echo "      - 减小模型上下文: 添加 --max-model-len 1024"
-    echo "      - 添加更多Ray节点扩展集群规模"
+    echo "      - 减小GPU使用率: 添加 --gpu-memory-utilization 0.8"
     echo ""
     echo "   B. 启动服务器失败:"
-    echo "      - 检查防火墙设置是否允许Ray相关端口"
-    echo "      - 确认SELinux配置不会阻止网络连接"
-    echo "      - 检查所有节点是否能通过IP互相访问"
+    echo "      - 检查GPU驱动: nvidia-smi"
+    echo "      - 检查CUDA版本: nvcc --version"
+    echo "      - 检查Python环境: which python; python --version"
+    echo "      - 检查vLLM和Ray安装: pip list | grep vllm; pip list | grep ray"
     echo ""
     echo "   C. 模型加载缓慢:"
     echo "      - 这是正常现象，特别是大型模型首次加载时需要较长时间"
-    echo "      - 建议使用共享存储或在各节点上预先下载模型"
+    echo "      - 建议启用量化以加快加载速度并减少内存使用"
     echo ""
     
-    echo "5. 分布式性能优化:"
-    echo "   - 在资源充足的机器上增加tensor-parallel-size以提高单请求性能"
-    echo "   - 使用更多工作节点可以提高系统整体吞吐量"
-    echo "   - 对于较大模型，使用分片可以跨多个节点分布模型权重"
-    echo "   - 内网带宽可能成为瓶颈，建议使用高速网络互联"
+    echo "5. 分布式部署 (Ray):"
+    echo "   - 使用Ray可以在多个节点上部署vLLM"
+    echo "   - 主节点启动时使用 --use-ray 和 --ray-workers 参数"
+    echo "   - 多节点部署需要先启动Ray集群，然后连接各节点"
+    echo "   - 可以使用ray up/ray attach命令管理Ray集群"
+    echo ""
+    
+    echo "6. 性能调优:"
+    echo "   - 使用 --tensor-parallel-size 参数等于GPU数量可提高多GPU性能"
+    echo "   - 使用 --ray-workers 参数设置Ray worker数量(通常设为节点数)"
+    echo "   - 调整 --max-tokens 可控制单次生成的最大长度"
+    echo "   - 调整 --gpu-memory-utilization 在0.0-1.0之间可控制显存使用率"
     echo ""
 }
 
@@ -1828,17 +1478,17 @@ show_installation_summary() {
 main() {
     clear
     echo "============================================================"
-    echo "           Rocky Linux vLLM+Ray 分布式环境配置工具            "
+    echo "            Rocky Linux vLLM+Ray 环境配置和检测工具          "
     echo "============================================================"
     echo ""
-    echo "此脚本将帮助您检查和配置Rocky Linux系统上的vLLM+Ray分布式环境，包括:"
+    echo "此脚本将帮助您检查和配置Rocky Linux/CentOS系统上的vLLM+Ray环境，包括:"
     echo "  - 检查系统环境"
     echo "  - 检查额外挂载的磁盘并选择数据存储位置"
     echo "  - 检查GPU和CUDA"
     echo "  - 设置Python虚拟环境"
     echo "  - 安装vLLM、Ray及相关依赖"
     echo "  - 下载和配置大语言模型"
-    echo "  - 生成Ray集群和vLLM服务器启动脚本"
+    echo "  - 生成启动脚本"
     echo ""
     
     # 检查是否有配置文件
@@ -1889,7 +1539,6 @@ main() {
     MODELS_DIR=""
     MISSING_PACKAGES=0
     TORCH_CUDA_ERROR=0
-    RAY_ERROR=0
     
     # 执行各个检查
     check_system
@@ -1910,9 +1559,9 @@ main() {
     recommend_models
     
     # 如果发现缺失包，强制安装vLLM和Ray
-    if [ "$MISSING_PACKAGES" -eq 1 ] || [ "$TORCH_CUDA_ERROR" -eq 1 ] || [ "$RAY_ERROR" -eq 1 ]; then
+    if [ "$MISSING_PACKAGES" -eq 1 ] || [ "$TORCH_CUDA_ERROR" -eq 1 ]; then
         print_warning "检测到必要依赖缺失，将自动安装vLLM、Ray及依赖..."
-        install_vllm
+        install_vllm_ray
         
         # 记录安装状态
         save_config "VLLM_INSTALLED" "1"
@@ -1922,12 +1571,12 @@ main() {
         local saved_vllm_installed=$(read_config "VLLM_INSTALLED" "")
         
         if [ "$saved_vllm_installed" = "1" ]; then
-            print_info "vLLM和Ray已安装（根据配置记录）"
+            print_info "vLLM已安装（根据配置记录）"
             read -p "是否重新安装vLLM和Ray? (y/n) [n]: " reinstall_choice
             reinstall_choice=${reinstall_choice:-n}
             
             if [[ $reinstall_choice =~ ^[Yy]$ ]]; then
-                install_vllm
+                install_vllm_ray
                 # 更新安装状态
                 save_config "VLLM_INSTALLED" "1"
             fi
@@ -1937,13 +1586,14 @@ main() {
             install_choice=${install_choice:-y}  # 默认为y
             
             if [[ $install_choice =~ ^[Yy]$ ]]; then
-                install_vllm
+                install_vllm_ray
                 # 记录安装状态
                 save_config "VLLM_INSTALLED" "1"
             fi
         fi
     fi
     
+    # 提供下载模型选项
     # 提供下载模型选项
     echo ""
     read -p "是否下载模型进行验证? (y/n) [y]: " download_choice
@@ -2030,21 +1680,17 @@ main() {
         fi
     fi
     
-    # 生成Ray集群和vLLM启动脚本
+    # 生成启动脚本
     echo ""
-    read -p "是否生成Ray集群和vLLM启动脚本? (y/n) [y]: " script_choice
+    read -p "是否生成启动脚本? (y/n) [y]: " script_choice
     script_choice=${script_choice:-y}  # 默认为y
     
     if [[ $script_choice =~ ^[Yy]$ ]]; then
-        generate_ray_head_script
-        generate_ray_worker_script
-        generate_vllm_ray_server_script
-        generate_test_script
-        generate_distributed_guide
+        generate_startup_script
     fi
     
     print_section "完成"
-    print_success "Rocky Linux vLLM+Ray分布式环境配置和检测已完成!"
+    print_success "Rocky Linux vLLM+Ray环境配置和检测已完成!"
     
     # 显示数据存储位置信息
     if [ -n "$SELECTED_DISK_PATH" ] && [ "$SELECTED_DISK_PATH" != "$(pwd)" ]; then
@@ -2067,60 +1713,20 @@ main() {
     print_section "后续操作"
     echo "配置完成后，您可以执行以下操作:"
     echo ""
-    echo "1. 启动Ray头节点 (在主节点上):"
+    echo "1. 启动vLLM+Ray服务器:"
     
-    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/start_ray_head.sh" ]; then
-        echo "   $SELECTED_DISK_PATH/start_ray_head.sh"
-        echo "   或使用当前目录中的快捷方式: ./start_ray_head.sh"
+    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/start_vllm_server.sh" ]; then
+        echo "   $SELECTED_DISK_PATH/start_vllm_server.sh"
+        echo "   或使用当前目录中的快捷方式: ./start_vllm_server.sh"
     else
-        echo "   ./start_ray_head.sh"
+        echo "   ./start_vllm_server.sh"
     fi
     
     echo ""
-    echo "2. 连接Ray工作节点 (在从节点上):"
-    
-    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/start_ray_worker.sh" ]; then
-        echo "   $SELECTED_DISK_PATH/start_ray_worker.sh <主节点IP>:<端口>"
-        echo "   或使用当前目录中的快捷方式: ./start_ray_worker.sh <主节点IP>:<端口>"
-    else
-        echo "   ./start_ray_worker.sh <主节点IP>:<端口>"
-    fi
-    
-    echo ""
-    echo "3. 启动vLLM+Ray服务器 (在主节点上):"
-    
-    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/start_vllm_ray_server.sh" ]; then
-        echo "   $SELECTED_DISK_PATH/start_vllm_ray_server.sh"
-        echo "   或使用当前目录中的快捷方式: ./start_vllm_ray_server.sh"
-    else
-        echo "   ./start_vllm_ray_server.sh"
-    fi
-    
-    echo ""
-    echo "4. 测试模型:"
-    
-    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/test_model.py" ]; then
-        echo "   python3 $SELECTED_DISK_PATH/test_model.py --model 模型路径"
-        echo "   或使用分布式测试: python3 $SELECTED_DISK_PATH/test_model.py --model 模型路径 --use-ray --ray-address \"ray://主节点IP:端口\""
-    else
-        echo "   python3 test_model.py --model 模型路径"
-        echo "   或使用分布式测试: python3 test_model.py --model 模型路径 --use-ray --ray-address \"ray://主节点IP:端口\""
-    fi
-    
-    echo ""
-    echo "5. 使用API调用模型 (服务器启动后):"
-    echo "   curl http://主节点IP:8000/v1/completions \\"
+    echo "2. 使用API调用模型 (服务器启动后):"
+    echo "   curl http://localhost:8000/v1/completions \\"
     echo "     -H \"Content-Type: application/json\" \\"
     echo "     -d '{\"model\": \"模型名称\", \"prompt\": \"你好\", \"max_tokens\": 100}'"
-    
-    echo ""
-    echo "6. 查看分布式部署指南:"
-    if [ -n "$SELECTED_DISK_PATH" ] && [ -f "$SELECTED_DISK_PATH/ray_vllm_guide.md" ]; then
-        echo "   less $SELECTED_DISK_PATH/ray_vllm_guide.md"
-        echo "   或在当前目录: less ./ray_vllm_guide.md"
-    else
-        echo "   less ./ray_vllm_guide.md"
-    fi
     
     # 如果激活了虚拟环境，添加提示
     if [ -n "$VENV_ACTIVE" ] && [ -n "$VENV_PATH" ]; then
@@ -2134,3 +1740,20 @@ main() {
     echo "按 Enter 键结束脚本..."
     read # 等待用户按回车，防止脚本立即退出
 }
+
+# 添加一个安全执行的main函数包装器
+run_main() {
+    debug_log "开始执行main函数"
+    
+    # 尝试执行main函数
+    if ! main; then
+        print_error "主程序执行失败"
+        echo "请查看上面的错误信息，解决问题后重新运行"
+        exit 1
+    fi
+    
+    debug_log "main函数执行完成"
+}
+
+# 运行安全包装的main函数
+run_main
