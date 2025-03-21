@@ -3,4 +3,7 @@ python -m vllm.entrypoints.openai.api_server \
     --tensor-parallel-size 8 \
     --host 0.0.0.0 \
     --port 8000 \
-    --distributed-executor-backend rayd
+    --max-model-len 131072 \
+    --max-num-seqs 256 \
+    --enforce-eager \
+    --distributed-executor-backend mp
