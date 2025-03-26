@@ -47,26 +47,6 @@ def print_success(text):
     print_colored(text, GREEN)
     logger.info(text)
 
-# 检查是否为AMD环境
-is_amd_env = False
-try:
-    # 检查环境变量
-    rocm_path = os.environ.get('ROCM_PATH')
-    if rocm_path:
-        print_info(f"检测到ROCm路径: {rocm_path}")
-        is_amd_env = True
-    
-    # 检查PyTorch是否为ROCm版本
-    if hasattr(torch, 'version') and hasattr(torch.version, 'hip') and torch.version.hip is not None:
-        print_success("检测到PyTorch ROCm版本")
-        is_amd_env = True
-except Exception as e:
-    print_warning(f"检查AMD环境时出错: {str(e)}")
-
-if not is_amd_env:
-    print_warning("未检测到AMD ROCm环境，这可能会导致在AMD GPU上的性能问题")
-    print_warning("建议使用针对AMD优化的PyTorch版本")
-
 # 解析命令行参数
 parser = argparse.ArgumentParser(description="Deploy DeepSeek-R1-Int4-AWQ model with Ray Serve on AMD GPU")
 parser.add_argument("--model-path", type=str, required=True, help="Path to the model directory")
@@ -80,6 +60,7 @@ parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 parser.add_argument("--ray-address", type=str, default="auto", help="Ray cluster address (already running)")
 parser.add_argument("--tensor-parallel-size", type=int, default=16, help="Tensor parallel size for distributed inference (default: 16)")
 parser.add_argument("--distributed", action="store_true", default=True, help="Enable distributed mode (required for tensor-parallel-size > 8)")
+parser.add_argument("--force-cpu", action="store_true", help="Force CPU mode even if no GPU is detected")
 args = parser.parse_args()
 
 # 启用调试模式
@@ -87,11 +68,15 @@ if args.debug:
     logger.setLevel(logging.DEBUG)
     print_info("调试模式已启用")
 
-# 处理自动GPU数量
+# 处理自动GPU数量 - 简化处理，不进行详细检测
 if args.num_gpus == "auto":
-    available_gpus = torch.cuda.device_count()
-    args.num_gpus = float(available_gpus)
-    print_success(f"自动检测GPU数量: {available_gpus}")
+    try:
+        available_gpus = torch.cuda.device_count()
+        args.num_gpus = float(available_gpus) if available_gpus > 0 else 0
+        print_info(f"GPU设置: {args.num_gpus}")
+    except:
+        print_warning("无法自动检测GPU数量，使用默认值1")
+        args.num_gpus = 1
 else:
     try:
         args.num_gpus = float(args.num_gpus)
@@ -129,24 +114,6 @@ if not os.access(args.model_path, os.R_OK):
     print_error(f"无法读取模型目录: {args.model_path}")
     sys.exit(1)
 
-# 检查是否有GPU可用（适用于AMD环境）
-if not torch.cuda.is_available():
-    print_error("检测不到GPU。请确保ROCm和PyTorch正确安装，并且可以访问AMD GPU。")
-    sys.exit(1)
-
-# 检查可用的GPU数量
-available_gpus = torch.cuda.device_count()
-print_info(f"本机检测到 {available_gpus} 个GPU")
-
-# 显示GPU设备信息
-for i in range(available_gpus):
-    try:
-        device_name = torch.cuda.get_device_name(i)
-        total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)  # GB
-        print_info(f"GPU {i}: {device_name} ({total_memory:.1f} GB)")
-    except Exception as e:
-        print_warning(f"无法获取GPU {i}的信息: {str(e)}")
-
 # 检查主机名
 hostname = socket.gethostname()
 print_info(f"主机名: {hostname}")
@@ -165,10 +132,9 @@ try:
     print_info(f"- 总GPU: {total_gpus}")
     print_info(f"- 总内存: {cluster_resources.get('memory', 0) / (1024**3):.1f} GB")
     
-    # 检查是否有足够的GPU用于张量并行
+    # 简化张量并行度检查
     if total_gpus < args.tensor_parallel_size:
-        print_error(f"集群中只有 {total_gpus} 个GPU，但张量并行度需要 {args.tensor_parallel_size} 个")
-        print_warning(f"请确保Ray集群包含了两台机器上的所有GPU")
+        print_warning(f"集群中只有 {total_gpus} 个GPU，但张量并行度设置为 {args.tensor_parallel_size}")
         print_warning(f"继续运行，但可能会因资源不足而失败")
 
     # 如果需要，关闭已有部署
@@ -200,16 +166,17 @@ try:
         "max_concurrent_queries": args.max_concurrent_queries,
     }
     
-    # 对于大规模分布式推理，增加一些资源设置
-    if args.distributed and args.tensor_parallel_size > available_gpus:
-        deployment_kwargs["ray_actor_options"].update({
-            "resources": {"worker_group": 1},  # 帮助Ray在多个节点上分配资源
-            "runtime_env": {
-                "env_vars": {
-                    "CUDA_VISIBLE_DEVICES": ",".join([str(i) for i in range(int(min(args.num_gpus, available_gpus)))]),
-                }
-            }
-        })
+    # 对于大规模分布式推理的资源设置
+    if args.distributed:
+        try:
+            available_gpus = torch.cuda.device_count()
+        except:
+            available_gpus = 0
+            
+        if args.tensor_parallel_size > available_gpus:
+            deployment_kwargs["ray_actor_options"].update({
+                "resources": {"worker_group": 1},  # 帮助Ray在多个节点上分配资源
+            })
 
     @serve.deployment(**deployment_kwargs)
     class DeepSeekInt4AMD:
@@ -224,12 +191,6 @@ try:
             try:
                 print_info(f"正在加载模型: {self.model_path}")
                 print_info(f"设备: {self.device}")
-                
-                # 自动获取可用GPU
-                gpu_count = torch.cuda.device_count()
-                gpu_ids = list(range(gpu_count))
-                print_info(f"使用GPU数量: {gpu_count}")
-                print_info(f"GPU设备IDs: {gpu_ids}")
                 
                 # 配置张量并行参数
                 tp_size = args.tensor_parallel_size
