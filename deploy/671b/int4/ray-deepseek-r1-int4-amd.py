@@ -62,6 +62,7 @@ parser.add_argument("--ray-address", type=str, default="auto", help="Ray cluster
 parser.add_argument("--tensor-parallel-size", type=int, default=16, help="Tensor parallel size for distributed inference (default: 16)")
 parser.add_argument("--distributed", action="store_true", default=True, help="Enable distributed mode (required for tensor-parallel-size > 8)")
 parser.add_argument("--force-cpu", action="store_true", help="Force CPU mode even if no GPU is detected")
+parser.add_argument("--force-amd", action="store_true", help="Force AMD mode for ROCm/HIP GPUs")
 args = parser.parse_args()
 
 # 启用调试模式
@@ -72,9 +73,19 @@ if args.debug:
 # 处理自动GPU数量 - 简化处理，不进行详细检测
 if args.num_gpus == "auto":
     try:
-        available_gpus = torch.cuda.device_count()
+        # 检测AMD GPU而不是CUDA GPU
+        if torch.cuda.is_available():
+            available_gpus = torch.cuda.device_count()
+            gpu_type = "CUDA"
+        elif hasattr(torch, 'hip') and torch.hip.is_available():
+            available_gpus = torch.hip.device_count()
+            gpu_type = "HIP/ROCm"
+        else:
+            available_gpus = 0
+            gpu_type = "未检测到"
+            
         args.num_gpus = float(available_gpus) if available_gpus > 0 else 0
-        print_info(f"GPU设置: {args.num_gpus}")
+        print_info(f"GPU设置: {args.num_gpus} ({gpu_type})")
     except:
         print_warning("无法自动检测GPU数量，使用默认值1")
         args.num_gpus = 1
@@ -169,7 +180,13 @@ try:
     # 对于大规模分布式推理的资源设置
     if args.distributed:
         try:
-            available_gpus = torch.cuda.device_count()
+            # 检测AMD GPU而不是CUDA GPU
+            if torch.cuda.is_available():
+                available_gpus = torch.cuda.device_count()
+            elif hasattr(torch, 'hip') and torch.hip.is_available():
+                available_gpus = torch.hip.device_count()
+            else:
+                available_gpus = 0
         except:
             available_gpus = 0
             
@@ -183,7 +200,25 @@ try:
         def __init__(self):
             """初始化DeepSeek模型服务（AMD版本）"""
             self.model_path = args.model_path
-            self.device = "cuda"
+            # 根据实际可用的设备设置或强制AMD设置
+            if args.force_amd:
+                # 强制使用AMD GPU
+                self.device = "hip"
+                self.device_type = "AMD (ROCm/HIP) [强制模式]"
+            elif args.force_cpu:
+                # 强制使用CPU
+                self.device = "cpu"
+                self.device_type = "CPU [强制模式]"
+            elif torch.cuda.is_available():
+                self.device = "cuda"
+                self.device_type = "NVIDIA (CUDA)"
+            elif hasattr(torch, 'hip') and torch.hip.is_available():
+                self.device = "hip"
+                self.device_type = "AMD (ROCm/HIP)"
+            else:
+                self.device = "cpu"
+                self.device_type = "CPU (无GPU可用)"
+            
             self.request_counter = 0
             self.hostname = socket.gethostname()
             self.model_id = str(uuid.uuid4())[:8]
@@ -192,7 +227,7 @@ try:
             
             try:
                 print_info(f"正在加载模型: {self.model_path}")
-                print_info(f"设备: {self.device}")
+                print_info(f"设备: {self.device} ({self.device_type})")
                 print_info(f"最大并发请求数: {self.max_concurrent_queries}")
                 
                 # 配置张量并行参数
@@ -218,14 +253,32 @@ try:
                         "enable_lora": False,
                     })
                 
+                # AMD GPU特定选项
+                if self.device == "hip" or args.force_amd:
+                    # AMD GPU特定的vLLM设置
+                    print_info("应用AMD GPU特定设置")
+                    load_kwargs.update({
+                        "device": "rocm",            # 有些vLLM版本需要显式指定"rocm"
+                        "use_amd": True,             # 启用AMD特定优化
+                        "max_model_len": 16384,      # 对于AMD可能需要限制上下文长度
+                        "gpu_memory_utilization": 0.85,  # AMD GPU通常需要更保守的内存设置
+                        "enforce_eager": True,       # 对AMD GPU更重要
+                        "trust_remote_code": True,   # 确保加载自定义代码
+                    })
+                
                 # 加载模型 (适用于大规模分布式部署)
-                self.model = LLM(
-                    model=self.model_path,
-                    tensor_parallel_size=tp_size,
-                    trust_remote_code=True,
-                    dtype="auto",
-                    **load_kwargs
-                )
+                # 根据设备类型选择适当的加载参数
+                load_args = {
+                    "model": self.model_path,
+                    "tensor_parallel_size": tp_size,
+                    "dtype": "auto",
+                }
+                # 合并所有加载参数
+                load_args.update(load_kwargs)
+                
+                # 实际加载模型
+                print_info(f"使用以下配置加载模型: {', '.join([f'{k}={v}' for k, v in load_args.items() if k != 'model'])}")
+                self.model = LLM(**load_args)
                 
                 print_success(f"模型加载成功：{self.model_path}")
                 print_success(f"使用张量并行度: {tp_size}，跨机器分布式推理启用")
