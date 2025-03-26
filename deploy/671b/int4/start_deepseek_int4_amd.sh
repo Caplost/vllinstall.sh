@@ -102,32 +102,17 @@ if [ "$TENSOR_PARALLEL_SIZE" -gt 8 ]; then
   echo -e "${YELLOW}建议在Ray集群包含两台机器的情况下使用此配置${NC}"
 fi
 
-# 检查AMD环境变量
-if [ -z "${ROCM_PATH}" ]; then
-  echo -e "${YELLOW}警告: ROCM_PATH环境变量未设置，可能影响ROCm环境的正常工作${NC}"
-  echo -e "${YELLOW}提示: 建议设置 export ROCM_PATH=/opt/rocm${NC}"
-fi
-
 # 暂时禁用立即退出，以便处理命令可能的错误
 set +e
 
-# 检查Ray集群状态和GPU可用性
-echo -e "${BLUE}检查Ray集群和GPU状态...${NC}"
+# 检查Ray集群状态
+echo -e "${BLUE}检查Ray集群状态...${NC}"
 ray status 2>/dev/null
 RAY_STATUS_CODE=$?
 
 if [ $RAY_STATUS_CODE -ne 0 ]; then
   echo -e "${YELLOW}警告: Ray集群状态检查失败，可能需要启动Ray集群${NC}"
   echo -e "${YELLOW}提示: 如果尚未启动Ray集群，请先运行 'ray start --head'${NC}"
-fi
-
-# 使用hy-smi检查GPU状态（如果有）
-if command -v hy-smi &> /dev/null; then
-  echo -e "${BLUE}检查GPU状态(hy-smi)...${NC}"
-  hy-smi 2>/dev/null || echo -e "${YELLOW}警告: 无法获取GPU信息${NC}"
-else
-  echo -e "${YELLOW}警告: 未找到hy-smi命令，无法详细验证GPU状态${NC}"
-  echo -e "${YELLOW}提示: 请确保HabanaAI环境正确安装${NC}"
 fi
 
 # 恢复立即退出设置
