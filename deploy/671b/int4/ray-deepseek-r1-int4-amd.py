@@ -77,9 +77,7 @@ parser.add_argument("--num-replicas", type=int, default=1, help="Number of repli
 parser.add_argument("--max-concurrent-queries", type=int, default=8, help="Maximum number of concurrent queries per worker")
 parser.add_argument("--no-shutdown", action="store_true", help="Don't shut down existing deployments")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-parser.add_argument("--distributed", action="store_true", help="Enable distributed mode")
-parser.add_argument("--ray-address", type=str, default=None, help="Ray cluster address (auto if not provided)")
-parser.add_argument("--memory-per-worker", type=str, default="60g", help="Memory per worker")
+parser.add_argument("--ray-address", type=str, default="auto", help="Ray cluster address (already running)")
 args = parser.parse_args()
 
 # 启用调试模式
@@ -107,12 +105,7 @@ print_info(f"每个副本使用GPU数量: {args.num_gpus}")
 print_info(f"副本数量: {args.num_replicas}")
 print_info(f"每个工作进程最大并发查询数: {args.max_concurrent_queries}")
 print_info(f"不关闭已有部署: {args.no_shutdown}")
-print_info(f"分布式模式: {args.distributed}")
-if args.ray_address:
-    print_info(f"Ray集群地址: {args.ray_address}")
-else:
-    print_info(f"Ray集群地址: 自动")
-print_info(f"每个工作进程内存: {args.memory_per_worker}")
+print_info(f"Ray集群地址: {args.ray_address}")
 
 # 检查模型路径
 if not os.path.exists(args.model_path):
@@ -150,19 +143,17 @@ hostname = socket.gethostname()
 print_info(f"主机名: {hostname}")
 
 try:
-    # 初始化Ray，如果已经初始化则忽略错误
-    ray_address = args.ray_address if args.ray_address else "auto"
-    ray.init(address=ray_address, namespace="vllm", ignore_reinit_error=True)
-    print_success(f"Ray 初始化成功，地址: {ray_address}")
+    # 连接到已经存在的Ray集群
+    print_info(f"连接到Ray集群: {args.ray_address}")
+    ray.init(address=args.ray_address, namespace="vllm", ignore_reinit_error=True)
+    print_success(f"成功连接到Ray集群")
     
     # 获取集群资源信息
-    if args.distributed:
-        cluster_resources = ray.cluster_resources()
-        print_info("Ray集群资源:")
-        print_info(f"- 节点数: {int(cluster_resources.get('node:__internal_config', 1))}")
-        print_info(f"- 总CPU: {int(cluster_resources.get('CPU', 0))}")
-        print_info(f"- 总GPU: {int(cluster_resources.get('GPU', 0))}")
-        print_info(f"- 总内存: {cluster_resources.get('memory', 0) / (1024**3):.1f} GB")
+    cluster_resources = ray.cluster_resources()
+    print_info("Ray集群资源:")
+    print_info(f"- 总CPU: {int(cluster_resources.get('CPU', 0))}")
+    print_info(f"- 总GPU: {int(cluster_resources.get('GPU', 0))}")
+    print_info(f"- 总内存: {cluster_resources.get('memory', 0) / (1024**3):.1f} GB")
 
     # 如果需要，关闭已有部署
     if not args.no_shutdown:
@@ -174,7 +165,7 @@ try:
             pass
 
     # 启动Ray Serve
-    serve.start(http_options={"host": "0.0.0.0", "port": args.port})
+    serve.start(http_options={"host": "0.0.0.0", "port": args.port}, detached=True)
     print_success(f"Ray Serve 启动成功，监听端口 {args.port}")
 
     # 导入模型相关库
