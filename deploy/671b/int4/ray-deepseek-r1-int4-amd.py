@@ -11,6 +11,7 @@ import uuid
 import json
 from typing import Dict, List, Optional, Union
 import torch
+import asyncio
 
 # 配置日志
 logging.basicConfig(
@@ -163,7 +164,6 @@ try:
     deployment_kwargs = {
         "num_replicas": args.num_replicas,
         "ray_actor_options": {"num_gpus": args.num_gpus},
-        "max_concurrent_queries": args.max_concurrent_queries,
     }
     
     # 对于大规模分布式推理的资源设置
@@ -187,10 +187,13 @@ try:
             self.request_counter = 0
             self.hostname = socket.gethostname()
             self.model_id = str(uuid.uuid4())[:8]
+            self.max_concurrent_queries = args.max_concurrent_queries
+            self.semaphore = asyncio.Semaphore(self.max_concurrent_queries)
             
             try:
                 print_info(f"正在加载模型: {self.model_path}")
                 print_info(f"设备: {self.device}")
+                print_info(f"最大并发请求数: {self.max_concurrent_queries}")
                 
                 # 配置张量并行参数
                 tp_size = args.tensor_parallel_size
@@ -245,89 +248,91 @@ try:
                     "status_code": 500
                 }
             
-            # 解析请求数据
-            try:
-                if isinstance(request, dict):
-                    data = request
-                else:
-                    data = await request.json()
-                
-                # 获取请求参数
-                prompt = data.get("prompt", "")
-                max_tokens = data.get("max_tokens", 1024)
-                temperature = data.get("temperature", 0.7)
-                top_p = data.get("top_p", 0.9)
-                top_k = data.get("top_k", 40)
-                
-                # 验证请求
-                if not prompt:
-                    return {
-                        "error": "Prompt is required",
-                        "status_code": 400
-                    }
-                
-                # 记录请求信息（调试模式）
-                if args.debug:
-                    print_info(f"Request #{self.request_counter} [{request_id}]")
-                    print_info(f"Prompt: {prompt[:50]}...")
-                    print_info(f"Max Tokens: {max_tokens}")
-                    print_info(f"Temperature: {temperature}")
-                
-                # 创建采样参数
-                sampling_params = SamplingParams(
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    max_tokens=max_tokens,
-                )
-                
-                # 生成回复
-                print_info(f"开始生成文本 [{request_id}]")
-                outputs = self.model.generate(prompt, sampling_params)
-                
-                # 处理结果
-                if outputs and len(outputs) > 0:
-                    generated_text = outputs[0].outputs[0].text.strip()
-                    prompt_tokens = outputs[0].prompt_token_ids
-                    completion_tokens = outputs[0].outputs[0].token_ids
+            # 使用信号量控制并发请求数
+            async with self.semaphore:
+                # 解析请求数据
+                try:
+                    if isinstance(request, dict):
+                        data = request
+                    else:
+                        data = await request.json()
                     
-                    # 构建响应
-                    response = {
-                        "id": request_id,
-                        "model": "DeepSeek-R1-Int4-AWQ-AMD",
-                        "node": self.hostname,
-                        "instance": self.model_id,
-                        "choices": [
-                            {
-                                "text": generated_text,
-                                "index": 0,
-                                "finish_reason": "stop"
-                            }
-                        ],
-                        "usage": {
-                            "prompt_tokens": len(prompt_tokens),
-                            "completion_tokens": len(completion_tokens),
-                            "total_tokens": len(prompt_tokens) + len(completion_tokens)
+                    # 获取请求参数
+                    prompt = data.get("prompt", "")
+                    max_tokens = data.get("max_tokens", 1024)
+                    temperature = data.get("temperature", 0.7)
+                    top_p = data.get("top_p", 0.9)
+                    top_k = data.get("top_k", 40)
+                    
+                    # 验证请求
+                    if not prompt:
+                        return {
+                            "error": "Prompt is required",
+                            "status_code": 400
                         }
-                    }
                     
-                    end_time = time.time()
-                    print_success(f"生成完成 [{request_id}], 耗时: {end_time - start_time:.2f}秒")
+                    # 记录请求信息（调试模式）
+                    if args.debug:
+                        print_info(f"Request #{self.request_counter} [{request_id}]")
+                        print_info(f"Prompt: {prompt[:50]}...")
+                        print_info(f"Max Tokens: {max_tokens}")
+                        print_info(f"Temperature: {temperature}")
                     
-                    return response
-                else:
-                    print_error(f"生成结果为空 [{request_id}]")
+                    # 创建采样参数
+                    sampling_params = SamplingParams(
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                        max_tokens=max_tokens,
+                    )
+                    
+                    # 生成回复
+                    print_info(f"开始生成文本 [{request_id}]")
+                    outputs = self.model.generate(prompt, sampling_params)
+                    
+                    # 处理结果
+                    if outputs and len(outputs) > 0:
+                        generated_text = outputs[0].outputs[0].text.strip()
+                        prompt_tokens = outputs[0].prompt_token_ids
+                        completion_tokens = outputs[0].outputs[0].token_ids
+                        
+                        # 构建响应
+                        response = {
+                            "id": request_id,
+                            "model": "DeepSeek-R1-Int4-AWQ-AMD",
+                            "node": self.hostname,
+                            "instance": self.model_id,
+                            "choices": [
+                                {
+                                    "text": generated_text,
+                                    "index": 0,
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": len(prompt_tokens),
+                                "completion_tokens": len(completion_tokens),
+                                "total_tokens": len(prompt_tokens) + len(completion_tokens)
+                            }
+                        }
+                        
+                        end_time = time.time()
+                        print_success(f"生成完成 [{request_id}], 耗时: {end_time - start_time:.2f}秒")
+                        
+                        return response
+                    else:
+                        print_error(f"生成结果为空 [{request_id}]")
+                        return {
+                            "error": "Generated text is empty",
+                            "status_code": 500
+                        }
+                        
+                except Exception as e:
+                    print_error(f"处理请求时出错: {str(e)}")
                     return {
-                        "error": "Generated text is empty",
+                        "error": str(e),
                         "status_code": 500
                     }
-                    
-            except Exception as e:
-                print_error(f"处理请求时出错: {str(e)}")
-                return {
-                    "error": str(e),
-                    "status_code": 500
-                }
 
     # 部署模型服务
     print_info(f"正在部署 {args.app_name}...")
