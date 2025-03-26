@@ -29,12 +29,12 @@ def print_success(text):
     print_colored(text, GREEN)
 
 # 解析命令行参数
-parser = argparse.ArgumentParser(description="Test DeepSeek-R1-Int4-AWQ service")
+parser = argparse.ArgumentParser(description="Test DeepSeek-R1-Channel-INT8 service")
 parser.add_argument("--url", type=str, default="http://localhost:8000/", help="Service URL (default: http://localhost:8000/)")
 parser.add_argument("--prompt", type=str, default="你好，请介绍一下自己", help="Prompt text")
 parser.add_argument("--max-tokens", type=int, default=1000, help="Maximum tokens to generate (default: 1000)")
 parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling (default: 0.7)")
-parser.add_argument("--model", type=str, default="DeepSeek-R1-Int4-AWQ", help="Model name to report in the request")
+parser.add_argument("--model", type=str, default="DeepSeek-R1-Channel-INT8", help="Model name to report in the request")
 parser.add_argument("--times", type=int, default=1, help="Number of times to run the test (default: 1)")
 args = parser.parse_args()
 
@@ -46,7 +46,7 @@ if args.url.endswith("/"):
 else:
     url = args.url + "/"
 
-print_info("==== DeepSeek-R1-Int4-AWQ 测试工具 ====")
+print_info("==== DeepSeek-R1-Channel-INT8 测试工具 ====")
 print_info(f"服务URL: {url}")
 print_info(f"提示词: {args.prompt}")
 print_info(f"最大生成Token数: {args.max_tokens}")
