@@ -72,17 +72,32 @@ parser = argparse.ArgumentParser(description="Deploy DeepSeek-R1-Int4-AWQ model 
 parser.add_argument("--model-path", type=str, required=True, help="Path to the model directory")
 parser.add_argument("--app-name", type=str, default="deepseek_r1_int4_amd", help="Application name")
 parser.add_argument("--port", type=int, default=8000, help="Port for the HTTP server")
-parser.add_argument("--num-gpus", type=float, default=1, help="Number of GPUs to use per replica")
+parser.add_argument("--num-gpus", type=str, default="auto", help="Number of GPUs to use per replica (number or 'auto')")
 parser.add_argument("--num-replicas", type=int, default=1, help="Number of replicas to deploy")
-parser.add_argument("--max-concurrent-queries", type=int, default=4, help="Maximum number of concurrent queries per worker")
+parser.add_argument("--max-concurrent-queries", type=int, default=8, help="Maximum number of concurrent queries per worker")
 parser.add_argument("--no-shutdown", action="store_true", help="Don't shut down existing deployments")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+parser.add_argument("--distributed", action="store_true", help="Enable distributed mode")
+parser.add_argument("--ray-address", type=str, default=None, help="Ray cluster address (auto if not provided)")
+parser.add_argument("--memory-per-worker", type=str, default="60g", help="Memory per worker")
 args = parser.parse_args()
 
 # 启用调试模式
 if args.debug:
     logger.setLevel(logging.DEBUG)
     print_info("调试模式已启用")
+
+# 处理自动GPU数量
+if args.num_gpus == "auto":
+    available_gpus = torch.cuda.device_count()
+    args.num_gpus = float(available_gpus)
+    print_success(f"自动检测GPU数量: {available_gpus}")
+else:
+    try:
+        args.num_gpus = float(args.num_gpus)
+    except ValueError:
+        print_error(f"无效的GPU数量: {args.num_gpus}，必须是数字或'auto'")
+        sys.exit(1)
 
 # 显示参数
 print_info(f"模型路径: {args.model_path}")
@@ -92,6 +107,12 @@ print_info(f"每个副本使用GPU数量: {args.num_gpus}")
 print_info(f"副本数量: {args.num_replicas}")
 print_info(f"每个工作进程最大并发查询数: {args.max_concurrent_queries}")
 print_info(f"不关闭已有部署: {args.no_shutdown}")
+print_info(f"分布式模式: {args.distributed}")
+if args.ray_address:
+    print_info(f"Ray集群地址: {args.ray_address}")
+else:
+    print_info(f"Ray集群地址: 自动")
+print_info(f"每个工作进程内存: {args.memory_per_worker}")
 
 # 检查模型路径
 if not os.path.exists(args.model_path):
@@ -114,16 +135,13 @@ if not torch.cuda.is_available():
 # 检查可用的GPU数量
 available_gpus = torch.cuda.device_count()
 print_info(f"检测到 {available_gpus} 个GPU")
-if available_gpus < args.num_gpus * args.num_replicas:
-    print_warning(f"配置请求 {args.num_gpus * args.num_replicas} GPU，但只有 {available_gpus} 个可用")
-    print_warning(f"将GPU数量限制为每个副本 {available_gpus / args.num_replicas}")
-    args.num_gpus = min(args.num_gpus, available_gpus / args.num_replicas)
 
 # 显示GPU设备信息
 for i in range(available_gpus):
     try:
         device_name = torch.cuda.get_device_name(i)
-        print_info(f"GPU {i}: {device_name}")
+        total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)  # GB
+        print_info(f"GPU {i}: {device_name} ({total_memory:.1f} GB)")
     except Exception as e:
         print_warning(f"无法获取GPU {i}的信息: {str(e)}")
 
@@ -133,8 +151,18 @@ print_info(f"主机名: {hostname}")
 
 try:
     # 初始化Ray，如果已经初始化则忽略错误
-    ray.init(address="auto", namespace="vllm", ignore_reinit_error=True)
-    print_success("Ray 初始化成功")
+    ray_address = args.ray_address if args.ray_address else "auto"
+    ray.init(address=ray_address, namespace="vllm", ignore_reinit_error=True)
+    print_success(f"Ray 初始化成功，地址: {ray_address}")
+    
+    # 获取集群资源信息
+    if args.distributed:
+        cluster_resources = ray.cluster_resources()
+        print_info("Ray集群资源:")
+        print_info(f"- 节点数: {int(cluster_resources.get('node:__internal_config', 1))}")
+        print_info(f"- 总CPU: {int(cluster_resources.get('CPU', 0))}")
+        print_info(f"- 总GPU: {int(cluster_resources.get('GPU', 0))}")
+        print_info(f"- 总内存: {cluster_resources.get('memory', 0) / (1024**3):.1f} GB")
 
     # 如果需要，关闭已有部署
     if not args.no_shutdown:
@@ -176,22 +204,27 @@ try:
                 print_info(f"正在加载模型: {self.model_path}")
                 print_info(f"设备: {self.device}")
                 
-                # AMD特有的环境变量
-                os.environ["HIP_VISIBLE_DEVICES"] = ",".join([str(i) for i in range(int(args.num_gpus))])
+                # 自动获取可用GPU
+                gpu_count = torch.cuda.device_count()
+                gpu_ids = list(range(gpu_count))
+                print_info(f"使用GPU数量: {gpu_count}")
+                print_info(f"GPU设备IDs: {gpu_ids}")
                 
-                # 加载模型 (AMD优化版本)
+                # 加载模型 (适用于64GB大内存GPU的优化版本)
+                tensor_parallel_size = min(int(args.num_gpus), gpu_count)
                 self.model = LLM(
                     model=self.model_path,
-                    tensor_parallel_size=int(args.num_gpus),
+                    tensor_parallel_size=tensor_parallel_size,
                     trust_remote_code=True,
                     dtype="auto",
-                    gpu_memory_utilization=0.8,  # AMD GPU通常需要更保守的内存使用
-                    max_model_len=4096,
-                    # 禁用一些可能在AMD上不稳定的优化
+                    gpu_memory_utilization=0.95,  # 利用更多GPU内存 (64GB GPU)
+                    max_model_len=16384,  # 更大的上下文窗口
                     enforce_eager=True,
+                    enable_lora=False,  # 禁用LoRA以提高性能
                 )
                 
                 print_success(f"模型加载成功：{self.model_path}")
+                print_success(f"使用张量并行度: {tensor_parallel_size}")
                 self.model_loaded = True
             except Exception as e:
                 print_error(f"加载模型时出错: {str(e)}")
