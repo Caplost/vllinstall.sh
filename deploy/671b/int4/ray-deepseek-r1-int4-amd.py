@@ -78,6 +78,8 @@ parser.add_argument("--max-concurrent-queries", type=int, default=8, help="Maxim
 parser.add_argument("--no-shutdown", action="store_true", help="Don't shut down existing deployments")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 parser.add_argument("--ray-address", type=str, default="auto", help="Ray cluster address (already running)")
+parser.add_argument("--tensor-parallel-size", type=int, default=16, help="Tensor parallel size for distributed inference (default: 16)")
+parser.add_argument("--distributed", action="store_true", default=True, help="Enable distributed mode (required for tensor-parallel-size > 8)")
 args = parser.parse_args()
 
 # 启用调试模式
@@ -104,8 +106,15 @@ print_info(f"端口: {args.port}")
 print_info(f"每个副本使用GPU数量: {args.num_gpus}")
 print_info(f"副本数量: {args.num_replicas}")
 print_info(f"每个工作进程最大并发查询数: {args.max_concurrent_queries}")
+print_info(f"张量并行度: {args.tensor_parallel_size}")
 print_info(f"不关闭已有部署: {args.no_shutdown}")
+print_info(f"分布式模式: {args.distributed}")
 print_info(f"Ray集群地址: {args.ray_address}")
+
+# 检测张量并行度是否合理
+if args.tensor_parallel_size > 8 and not args.distributed:
+    print_warning(f"张量并行度 {args.tensor_parallel_size} 大于8，但分布式模式未启用。自动启用分布式模式。")
+    args.distributed = True
 
 # 检查模型路径
 if not os.path.exists(args.model_path):
@@ -127,7 +136,7 @@ if not torch.cuda.is_available():
 
 # 检查可用的GPU数量
 available_gpus = torch.cuda.device_count()
-print_info(f"检测到 {available_gpus} 个GPU")
+print_info(f"本机检测到 {available_gpus} 个GPU")
 
 # 显示GPU设备信息
 for i in range(available_gpus):
@@ -150,10 +159,17 @@ try:
     
     # 获取集群资源信息
     cluster_resources = ray.cluster_resources()
+    total_gpus = int(cluster_resources.get('GPU', 0))
     print_info("Ray集群资源:")
     print_info(f"- 总CPU: {int(cluster_resources.get('CPU', 0))}")
-    print_info(f"- 总GPU: {int(cluster_resources.get('GPU', 0))}")
+    print_info(f"- 总GPU: {total_gpus}")
     print_info(f"- 总内存: {cluster_resources.get('memory', 0) / (1024**3):.1f} GB")
+    
+    # 检查是否有足够的GPU用于张量并行
+    if total_gpus < args.tensor_parallel_size:
+        print_error(f"集群中只有 {total_gpus} 个GPU，但张量并行度需要 {args.tensor_parallel_size} 个")
+        print_warning(f"请确保Ray集群包含了两台机器上的所有GPU")
+        print_warning(f"继续运行，但可能会因资源不足而失败")
 
     # 如果需要，关闭已有部署
     if not args.no_shutdown:
@@ -177,11 +193,25 @@ try:
         print_warning("请安装支持AMD的vLLM版本")
         sys.exit(1)
 
-    @serve.deployment(
-        num_replicas=args.num_replicas,
-        ray_actor_options={"num_gpus": args.num_gpus},
-        max_concurrent_queries=args.max_concurrent_queries
-    )
+    # 为张量并行处理设置更多资源
+    deployment_kwargs = {
+        "num_replicas": args.num_replicas,
+        "ray_actor_options": {"num_gpus": args.num_gpus},
+        "max_concurrent_queries": args.max_concurrent_queries,
+    }
+    
+    # 对于大规模分布式推理，增加一些资源设置
+    if args.distributed and args.tensor_parallel_size > available_gpus:
+        deployment_kwargs["ray_actor_options"].update({
+            "resources": {"worker_group": 1},  # 帮助Ray在多个节点上分配资源
+            "runtime_env": {
+                "env_vars": {
+                    "CUDA_VISIBLE_DEVICES": ",".join([str(i) for i in range(int(min(args.num_gpus, available_gpus)))]),
+                }
+            }
+        })
+
+    @serve.deployment(**deployment_kwargs)
     class DeepSeekInt4AMD:
         def __init__(self):
             """初始化DeepSeek模型服务（AMD版本）"""
@@ -201,21 +231,40 @@ try:
                 print_info(f"使用GPU数量: {gpu_count}")
                 print_info(f"GPU设备IDs: {gpu_ids}")
                 
-                # 加载模型 (适用于64GB大内存GPU的优化版本)
-                tensor_parallel_size = min(int(args.num_gpus), gpu_count)
+                # 配置张量并行参数
+                tp_size = args.tensor_parallel_size
+                print_info(f"设置张量并行度: {tp_size}")
+                
+                # 分布式模式下的优化选项
+                load_kwargs = {}
+                if args.distributed:
+                    load_kwargs.update({
+                        "quantization": "awq",           # 使用AWQ量化
+                        "block_size": 16,                # 增大块大小以提高吞吐量
+                        "gpu_memory_utilization": 0.92,  # 使用更多GPU内存
+                        "max_model_len": 32768,          # 支持更长的上下文
+                        "enforce_eager": True,           # 在分布式环境中更可靠
+                        "enable_lora": False,            # 禁用LoRA以提高性能
+                    })
+                else:
+                    load_kwargs.update({
+                        "gpu_memory_utilization": 0.95, 
+                        "max_model_len": 16384,
+                        "enforce_eager": True,
+                        "enable_lora": False,
+                    })
+                
+                # 加载模型 (适用于大规模分布式部署)
                 self.model = LLM(
                     model=self.model_path,
-                    tensor_parallel_size=tensor_parallel_size,
+                    tensor_parallel_size=tp_size,
                     trust_remote_code=True,
                     dtype="auto",
-                    gpu_memory_utilization=0.95,  # 利用更多GPU内存 (64GB GPU)
-                    max_model_len=16384,  # 更大的上下文窗口
-                    enforce_eager=True,
-                    enable_lora=False,  # 禁用LoRA以提高性能
+                    **load_kwargs
                 )
                 
                 print_success(f"模型加载成功：{self.model_path}")
-                print_success(f"使用张量并行度: {tensor_parallel_size}")
+                print_success(f"使用张量并行度: {tp_size}，跨机器分布式推理启用")
                 self.model_loaded = True
             except Exception as e:
                 print_error(f"加载模型时出错: {str(e)}")

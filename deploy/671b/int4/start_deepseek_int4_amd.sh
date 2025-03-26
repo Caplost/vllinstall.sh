@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 
 # 输出带颜色的信息
 echo -e "${BLUE}============================================${NC}"
-echo -e "${GREEN}启动 DeepSeek-R1-Int4-AWQ 模型服务 (连接已有集群)${NC}"
+echo -e "${GREEN}启动 DeepSeek-R1-Int4-AWQ 模型服务 (跨机器分布式部署)${NC}"
 echo -e "${BLUE}============================================${NC}"
 
 # 默认参数
@@ -21,6 +21,7 @@ DEBUG=false
 NUM_GPUS="auto"  # 自动获取所有可用GPU
 PORT=8000
 RAY_ADDRESS="auto"  # 默认自动连接已有集群
+TENSOR_PARALLEL_SIZE=16  # 默认使用16卡张量并行
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -53,17 +54,22 @@ while [[ $# -gt 0 ]]; do
       RAY_ADDRESS="$2"
       shift 2
       ;;
+    --tensor-parallel-size)
+      TENSOR_PARALLEL_SIZE="$2"
+      shift 2
+      ;;
     --help)
       echo "使用方法: $0 [选项]"
       echo "选项:"
-      echo "  --model-path <路径>         模型路径 (默认: /home/models/DeepSeek-R1-Int4-AWQ)"
-      echo "  --app-name <名称>           应用名称 (默认: deepseek_r1_int4_amd)"
-      echo "  --no-shutdown               不关闭已有部署"
-      echo "  --debug                     启用调试模式"
-      echo "  --num-gpus <数量|auto>      每个副本使用的GPU数量 (默认: auto，自动获取所有可用GPU)"
-      echo "  --port <端口>               服务端口 (默认: 8000)"
-      echo "  --ray-address <地址:端口>   Ray集群地址 (默认: auto，自动连接)"
-      echo "  --help                      显示此帮助信息"
+      echo "  --model-path <路径>              模型路径 (默认: /home/models/DeepSeek-R1-Int4-AWQ)"
+      echo "  --app-name <名称>                应用名称 (默认: deepseek_r1_int4_amd)"
+      echo "  --no-shutdown                    不关闭已有部署"
+      echo "  --debug                          启用调试模式"
+      echo "  --num-gpus <数量|auto>           每个副本使用的GPU数量 (默认: auto，自动获取所有可用GPU)"
+      echo "  --port <端口>                    服务端口 (默认: 8000)"
+      echo "  --ray-address <地址:端口>        Ray集群地址 (默认: auto，自动连接)"
+      echo "  --tensor-parallel-size <数量>    张量并行度 (默认: 16，用于跨机器推理)"
+      echo "  --help                           显示此帮助信息"
       exit 0
       ;;
     *)
@@ -79,6 +85,7 @@ echo -e "${BLUE}- 模型路径: ${MODEL_PATH}${NC}"
 echo -e "${BLUE}- 应用名称: ${APP_NAME}${NC}"
 echo -e "${BLUE}- 端口: ${PORT}${NC}"
 echo -e "${BLUE}- GPU配置: ${NUM_GPUS}${NC}"
+echo -e "${BLUE}- 张量并行度: ${TENSOR_PARALLEL_SIZE}${NC}"
 echo -e "${BLUE}- Ray集群地址: ${RAY_ADDRESS}${NC}"
 if [ "$DEBUG" = true ]; then
   echo -e "${BLUE}- 调试模式: 已启用${NC}"
@@ -87,6 +94,12 @@ if [ "$NO_SHUTDOWN" = true ]; then
   echo -e "${BLUE}- 保留已有部署: 是${NC}"
 else
   echo -e "${BLUE}- 保留已有部署: 否${NC}"
+fi
+
+# 检查张量并行度参数
+if [ "$TENSOR_PARALLEL_SIZE" -gt 8 ]; then
+  echo -e "${YELLOW}注意: 使用高张量并行度 ${TENSOR_PARALLEL_SIZE}，确保Ray集群可以访问至少${TENSOR_PARALLEL_SIZE}张GPU${NC}"
+  echo -e "${YELLOW}建议在Ray集群包含两台机器的情况下使用此配置${NC}"
 fi
 
 # 检查AMD环境变量
@@ -103,7 +116,7 @@ else
   echo -e "${BLUE}检查AMD GPU状态...${NC}"
   # 使用正确的参数检测GPU数量
   GPU_COUNT=$(rocm-smi | grep -c "GPU")
-  echo -e "${GREEN}检测到 ${GPU_COUNT} 个GPU${NC}"
+  echo -e "${GREEN}检测到 ${GPU_COUNT} 个本地GPU${NC}"
   # 显示内存信息
   rocm-smi --showmeminfo || echo -e "${YELLOW}警告: 无法显示GPU内存信息${NC}"
 fi
@@ -134,10 +147,11 @@ fi
 echo -e "${BLUE}============================================${NC}"
 echo -e "${GREEN}启动中...${NC}"
 echo -e "${GREEN}连接到Ray集群: ${RAY_ADDRESS}${NC}"
+echo -e "${GREEN}使用${TENSOR_PARALLEL_SIZE}张GPU进行分布式推理${NC}"
 
 # 执行Python脚本
-echo -e "${BLUE}执行命令: python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path ${MODEL_PATH} --app-name ${APP_NAME} --port ${PORT} --num-gpus ${NUM_GPUS} --ray-address ${RAY_ADDRESS} ${PYTHON_ARGS}${NC}"
-python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path "${MODEL_PATH}" --app-name "${APP_NAME}" --port "${PORT}" --num-gpus "${NUM_GPUS}" --ray-address "${RAY_ADDRESS}" ${PYTHON_ARGS}
+echo -e "${BLUE}执行命令: python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path ${MODEL_PATH} --app-name ${APP_NAME} --port ${PORT} --num-gpus ${NUM_GPUS} --ray-address ${RAY_ADDRESS} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} ${PYTHON_ARGS}${NC}"
+python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path "${MODEL_PATH}" --app-name "${APP_NAME}" --port "${PORT}" --num-gpus "${NUM_GPUS}" --ray-address "${RAY_ADDRESS}" --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" ${PYTHON_ARGS}
 
 echo -e "${GREEN}启动命令已执行${NC}"
 echo -e "${BLUE}============================================${NC}"
