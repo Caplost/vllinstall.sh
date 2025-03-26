@@ -14,7 +14,7 @@ echo -e "${GREEN}启动 DeepSeek-R1-Int4-AWQ 模型服务 (跨机器分布式部
 echo -e "${BLUE}============================================${NC}"
 
 # 默认参数
-MODEL_PATH="/home/models/DeepSeek-R1-Int4-AWQ"
+MODEL_PATH="/data/models/DeepSeek-Coder-R1-v1.5-Int4-AWQ"
 APP_NAME="deepseek_r1_int4_amd"
 NO_SHUTDOWN=false
 DEBUG=false
@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --help)
       echo "使用方法: $0 [选项]"
       echo "选项:"
-      echo "  --model-path <路径>              模型路径 (默认: /home/models/DeepSeek-R1-Int4-AWQ)"
+      echo "  --model-path <路径>              模型路径 (默认: /data/models/DeepSeek-Coder-R1-v1.5-Int4-AWQ)"
       echo "  --app-name <名称>                应用名称 (默认: deepseek_r1_int4_amd)"
       echo "  --no-shutdown                    不关闭已有部署"
       echo "  --debug                          启用调试模式"
