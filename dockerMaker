@@ -1,0 +1,5 @@
+docker commit -m "vllm 0.6 + ray 2.10.0 master" -a "made by 王寅能" 6934a94d8763 hub.qpaas.com/aimod/vllm-ray-qpaas-master:v1.0
+
+0cbff029edc0
+
+docker commit -m "vllm 0.6 + ray 2.10.0 worker" -a "made by 王寅能" 0cbff029edc0 hub.qpaas.com/aimod/vllm-ray-qpaas-worker:v1.0

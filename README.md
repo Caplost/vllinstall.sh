@@ -1,153 +1,151 @@
-# DeepSeek r1 671B Deployment with Ray (16 GPUs)
+# DeepSeek R1 INT8 Model Deployment
 
-This repository contains scripts for deploying the DeepSeek r1 671B large language model using Ray for distributed inference across 16 GPUs.
+This repository contains a Python script for deploying the DeepSeek R1 INT8 quantized model on an existing Ray cluster with tensor parallelism across multiple GPUs.
+
+## Overview
+
+The `deploy_deepseek_r1_int8.py` script simplifies deploying DeepSeek's R1 INT8 model by:
+
+- Connecting to your existing Ray cluster
+- Installing all required dependencies
+- Handling multiple import patterns for DeepSeek modules
+- Setting up tensor parallelism across 16 GPUs
+- Deploying a REST API service with Ray Serve
 
 ## Requirements
 
 - Python 3.8+
-- PyTorch 2.0+
-- Ray 2.9.0+
-- 16 GPUs with sufficient VRAM (80GB+ per GPU recommended for the 671B model)
-- NVIDIA drivers and CUDA toolkit
-- DeepSeek-specific packages
+- Existing Ray cluster with 16 GPUs (64GB VRAM each)
+- DeepSeek R1 INT8 model files in `/home/models/DeepSeek-R1-Channel-INT8` (or specified path)
 
-## Files Overview
-
-- `deploy_deepseek_r1_671b.py`: Main Python script for model deployment
-- `deploy_deepseek_r1_671b.sh`: Interactive shell script for single-node deployment
-- `deploy_deepseek_r1_671b_multi_node.sh`: Script for multi-node deployment
-
-## Single-Node Deployment (16 GPUs on one machine)
-
-For a single machine with 16 GPUs, you can use the interactive deployment script:
+## Quick Start
 
 ```bash
-chmod +x deploy_deepseek_r1_671b.sh
-./deploy_deepseek_r1_671b.sh
+# Deploy with default settings
+python deploy_deepseek_r1_int8.py
+
+# Deploy with dependency installation
+python deploy_deepseek_r1_int8.py --install_deps
+
+# Deploy with custom model path
+python deploy_deepseek_r1_int8.py --model_path /path/to/model --install_deps
+
+# Run diagnostics before deployment
+python deploy_deepseek_r1_int8.py --debug --install_deps
 ```
 
-This will guide you through the following steps:
-1. Checking system dependencies
-2. Installing required packages
-3. Starting a Ray cluster
-4. Configuring the model deployment
-5. Deploying the model
-6. Testing the deployed model
+## Usage Options
 
-Alternatively, run the whole process at once:
-
-```bash
-./deploy_deepseek_r1_671b.sh all
+```
+usage: deploy_deepseek_r1_int8.py [-h] [--model_path MODEL_PATH] [--tensor_parallel_size TENSOR_PARALLEL_SIZE]
+                                  [--host HOST] [--port PORT] [--max_batch_size MAX_BATCH_SIZE]
+                                  [--max_input_length MAX_INPUT_LENGTH] [--max_output_length MAX_OUTPUT_LENGTH]
+                                  [--ray_address RAY_ADDRESS] [--install_deps] [--cache_dir CACHE_DIR] [--debug]
 ```
 
-## Multi-Node Deployment (GPUs distributed across machines)
+### Model Arguments
 
-When your 16 GPUs are distributed across multiple machines, use the multi-node deployment script:
+- `--model_path`: Path to the DeepSeek R1 INT8 model (default: `/home/models/DeepSeek-R1-Channel-INT8`)
+- `--tensor_parallel_size`: Number of GPUs to use for tensor parallelism (default: 16)
 
-### On the head node:
+### Server Arguments
+
+- `--host`: Host to bind the server to (default: `0.0.0.0`)
+- `--port`: Port to bind the server to (default: 8000)
+
+### Generation Arguments
+
+- `--max_batch_size`: Maximum batch size for inference (default: 32)
+- `--max_input_length`: Maximum input sequence length (default: 4096)
+- `--max_output_length`: Maximum output sequence length (default: 4096)
+
+### Ray Cluster Arguments
+
+- `--ray_address`: Ray cluster address to connect to (default: "auto")
+
+### Other Arguments
+
+- `--install_deps`: Install dependencies before deployment
+- `--cache_dir`: Directory to cache model weights
+- `--debug`: Enable debug mode with detailed diagnostics
+
+## Connecting to a Specific Ray Cluster
+
+If your Ray cluster is running at a specific address, you can specify it:
 
 ```bash
-chmod +x deploy_deepseek_r1_671b_multi_node.sh
-./deploy_deepseek_r1_671b_multi_node.sh --head
+python deploy_deepseek_r1_int8.py --ray_address "ray://192.168.1.100:10001"
 ```
 
-This will start the Ray head node and display the address to use for worker nodes.
+## Making API Requests
 
-### On each worker node:
-
-```bash
-./deploy_deepseek_r1_671b_multi_node.sh --worker --head-address <head_ip>:6379
-```
-
-Replace `<head_ip>` with the IP address of your head node.
-
-### Deploy the model (run on the head node):
+After deployment, you can interact with the model through the REST API:
 
 ```bash
-./deploy_deepseek_r1_671b_multi_node.sh --deploy
-```
+# Basic request
+curl -X POST http://localhost:8000 \
+     -H "Content-Type: application/json" \
+     -d '{"prompt": "Once upon a time", "max_new_tokens": 512, "temperature": 0.7}'
 
-This will deploy the DeepSeek r1 671B model across all available GPUs in the cluster.
-
-## API Usage
-
-Once deployed, the model serves an HTTP API on port 8000 by default. Here's how to use it:
-
-### Generate text
-
-```bash
+# Custom generation parameters
 curl -X POST http://localhost:8000 \
      -H "Content-Type: application/json" \
      -d '{
-       "prompt": "DeepSeek r1 671B is a large language model that can",
-       "max_new_tokens": 512,
-       "temperature": 0.7,
-       "top_p": 0.9,
-       "top_k": 50,
-       "repetition_penalty": 1.1
-     }'
+           "prompt": "Write a short story about AI",
+           "max_new_tokens": 1024,
+           "temperature": 0.8,
+           "top_p": 0.95,
+           "top_k": 50,
+           "repetition_penalty": 1.2
+         }'
 ```
 
-### API Parameters
+## API Response Format
 
-- `prompt`: Text input to the model
-- `max_new_tokens`: Maximum number of tokens to generate (default: 512)
-- `temperature`: Controls randomness (default: 0.7)
-- `top_p`: Nucleus sampling parameter (default: 0.9)
-- `top_k`: Top-k sampling parameter (default: 50)
-- `repetition_penalty`: Penalizes repetition (default: 1.1)
-
-## Stopping the Cluster
-
-To stop the Ray cluster:
-
-```bash
-# Single-node
-./deploy_deepseek_r1_671b.sh
-# Then select option 7 from the menu
-
-# Multi-node
-./deploy_deepseek_r1_671b_multi_node.sh --stop
+```json
+{
+  "generated_text": "... generated text here ...",
+  "input_tokens": 10,
+  "generated_tokens": 512,
+  "generation_time": 5.2,
+  "tokens_per_second": 98.5
+}
 ```
 
 ## Troubleshooting
 
-### Insufficient GPU Memory
+### Missing Dependencies
 
-The DeepSeek r1 671B model requires significant GPU memory. If you encounter CUDA out-of-memory errors:
+If you encounter errors related to missing packages, use the `--install_deps` flag:
 
-1. Ensure each GPU has enough VRAM (80GB+ per GPU recommended)
-2. Try increasing the level of tensor parallelism
-3. Reduce batch size and sequence length parameters
+```bash
+python deploy_deepseek_r1_int8.py --install_deps
+```
 
-### Connection Issues in Multi-Node Setup
+### DeepSeek Module Import Issues
 
-If worker nodes cannot connect to the head node:
+The script tries multiple import patterns for DeepSeek modules. If you still encounter issues, check:
 
-1. Ensure firewalls allow connections on port 6379
-2. Verify all machines can communicate on the network
-3. Make sure the correct IP address is used for the head node
+```bash
+python deploy_deepseek_r1_int8.py --debug
+```
 
-### Model Loading Failures
+### Insufficient GPU Resources
 
-If the model fails to load:
+If your Ray cluster has fewer than 16 GPUs, the script will warn you and ask if you want to continue.
 
-1. Verify the model path is correct
-2. Ensure all required DeepSeek packages are installed
-3. Check for compatibility between the model and DeepSeek library versions
+### Checking Ray Cluster Status
+
+Use Ray's built-in tools to check your cluster status:
+
+```bash
+ray status
+```
 
 ## Advanced Configuration
 
-For advanced configurations, you can directly edit the Python deployment script or pass additional parameters:
+For advanced customization, you can modify the `model_deployment.py` file that's generated by the script. This file contains the Ray Serve deployment class and model loading logic.
 
-```bash
-python3 deploy_deepseek_r1_671b.py \
-    --model_path /path/to/model \
-    --tensor_parallel_size 16 \
-    --max_batch_size 16 \
-    --max_input_length 2048 \
-    --max_output_length 2048 \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --ray_address auto
-``` 
+## License
+
+This deployment script is provided as-is. The DeepSeek model is subject to its own license terms. 

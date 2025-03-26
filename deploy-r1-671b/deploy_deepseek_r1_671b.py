@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-DeepSeek r1 671B Deployment Script with Ray (16 GPUs)
+DeepSeek r1 INT8 Deployment Script with Ray (16 GPUs)
 ====================================================
-This script sets up a Ray cluster for deploying the DeepSeek r1 671B model across 16 GPUs.
+This script sets up a Ray cluster for deploying the DeepSeek r1 INT8 model across 16 GPUs.
 It handles model loading, tensor parallelism, and provides an inference API.
 
 Requirements:
 - Python 3.8+
 - Ray 2.9.0+
 - DeepSeek specific requirements
-- 16 GPUs with sufficient VRAM (minimum 80GB per GPU recommended for 671B model)
+- 16 GPUs with sufficient VRAM (64GB per GPU across two servers)
 """
 
 import os
@@ -36,9 +36,9 @@ logger = logging.getLogger("deepseek-deploy")
 
 # Parse command line arguments
 def parse_args():
-    parser = argparse.ArgumentParser(description="Deploy DeepSeek r1 671B model with Ray")
-    parser.add_argument("--model_path", type=str, required=True, 
-                        help="Path to the DeepSeek r1 671B model")
+    parser = argparse.ArgumentParser(description="Deploy DeepSeek r1 INT8 model with Ray")
+    parser.add_argument("--model_path", type=str, default="/home/models/DeepSeek-R1-Channel-INT8", 
+                        help="Path to the DeepSeek r1 INT8 model")
     parser.add_argument("--tensor_parallel_size", type=int, default=16,
                         help="Number of GPUs to use for tensor parallelism")
     parser.add_argument("--host", type=str, default="0.0.0.0",
@@ -121,7 +121,7 @@ class DeepSeekModel:
                  max_output_length: int = 4096,
                  cache_dir: Optional[str] = None):
         """
-        Initialize the DeepSeek r1 671B model with the specified configuration.
+        Initialize the DeepSeek r1 INT8 model with the specified configuration.
         
         Args:
             model_path: Path to the DeepSeek model
@@ -142,45 +142,82 @@ class DeepSeekModel:
         self._load_model()
     
     def _load_model(self):
-        """Load the DeepSeek r1 671B model with tensor parallelism."""
-        logger.info(f"Loading DeepSeek r1 671B model from {self.model_path}")
+        """Load the DeepSeek r1 INT8 model with tensor parallelism."""
+        logger.info(f"Loading DeepSeek r1 INT8 model from {self.model_path}")
         logger.info(f"Using tensor parallel size: {self.tensor_parallel_size}")
         
         # Import the necessary DeepSeek modules for model loading
         try:
             # This import structure may need to be modified based on DeepSeek's actual API
-            from deepseek.model import DeepSeekForCausalLM
-            from deepseek.tokenizer import DeepSeekTokenizer
-            import deepseek.parallel as parallel
-        except ImportError:
-            logger.error("Failed to import DeepSeek modules. Please make sure they are installed.")
-            logger.error("You may need to install with: pip install deepseek-llm")
+            try:
+                from deepseek.model import DeepSeekForCausalLM
+                from deepseek.tokenizer import DeepSeekTokenizer
+                import deepseek.parallel as parallel
+            except ImportError:
+                # Try alternative import structure (depending on DeepSeek's actual package structure)
+                try:
+                    from deepseek_llm.model import DeepSeekForCausalLM
+                    from deepseek_llm.tokenizer import DeepSeekTokenizer
+                    import deepseek_llm.parallel as parallel
+                    logger.info("Using deepseek_llm package structure")
+                except ImportError:
+                    try:
+                        from deepseek.llm.model import DeepSeekForCausalLM
+                        from deepseek.llm.tokenizer import DeepSeekTokenizer
+                        import deepseek.llm.parallel as parallel
+                        logger.info("Using deepseek.llm package structure")
+                    except ImportError:
+                        raise ImportError("Could not import DeepSeek modules with any known import patterns")
+        except ImportError as e:
+            logger.error(f"Failed to import DeepSeek modules: {str(e)}")
+            logger.error("Please make sure the required packages are installed.")
+            logger.error("You can try the following installation commands:")
+            logger.error("pip install deepseek-llm")
+            logger.error("pip install deepseek")
+            logger.error("Or check the official DeepSeek documentation for installation instructions.")
             sys.exit(1)
         
         # Initialize tensor parallelism
-        parallel.init_distributed(tensor_parallel_size=self.tensor_parallel_size,
-                                 pipeline_parallel_size=1)
+        try:
+            logger.info("Initializing tensor parallelism...")
+            parallel.init_distributed(tensor_parallel_size=self.tensor_parallel_size,
+                                     pipeline_parallel_size=1)
+            logger.info("Tensor parallelism initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize tensor parallelism: {str(e)}")
+            sys.exit(1)
         
         # Load tokenizer
-        self.tokenizer = DeepSeekTokenizer.from_pretrained(self.model_path, cache_dir=self.cache_dir)
+        try:
+            logger.info(f"Loading tokenizer from {self.model_path}")
+            self.tokenizer = DeepSeekTokenizer.from_pretrained(self.model_path, cache_dir=self.cache_dir)
+            logger.info("Tokenizer loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load tokenizer: {str(e)}")
+            sys.exit(1)
         
         # Load model with tensor parallelism
-        model_kwargs = {
-            "tensor_parallel_size": self.tensor_parallel_size,
-            "device_map": "auto",
-            "torch_dtype": torch.bfloat16,  # Use bfloat16 for better performance
-            "low_cpu_mem_usage": True,
-        }
-        
-        if self.cache_dir:
-            model_kwargs["cache_dir"] = self.cache_dir
-        
-        self.model = DeepSeekForCausalLM.from_pretrained(
-            self.model_path,
-            **model_kwargs
-        )
-        
-        logger.info("Model loaded successfully")
+        try:
+            model_kwargs = {
+                "tensor_parallel_size": self.tensor_parallel_size,
+                "device_map": "auto",
+                # No need to specify torch_dtype for INT8 model as it uses quantization
+                "low_cpu_mem_usage": True,
+            }
+            
+            if self.cache_dir:
+                model_kwargs["cache_dir"] = self.cache_dir
+            
+            logger.info(f"Loading model from {self.model_path} with kwargs: {model_kwargs}")
+            self.model = DeepSeekForCausalLM.from_pretrained(
+                self.model_path,
+                **model_kwargs
+            )
+            logger.info("Model loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load model: {str(e)}")
+            logger.error("This could be due to missing dependencies, incorrect model path, or hardware limitations.")
+            sys.exit(1)
     
     async def generate(self, prompt: str, 
                      max_new_tokens: int = 512,
@@ -243,7 +280,7 @@ class DeepSeekModel:
     async def __call__(self, request) -> Dict[str, Any]:
         """Handle HTTP requests for model generation."""
         if request.method == "GET":
-            return {"status": "DeepSeek r1 671B model is running"}
+            return {"status": "DeepSeek r1 INT8 model is running"}
         
         try:
             data = await request.json()
@@ -261,7 +298,7 @@ class DeepSeekModel:
 
 # Main deployment function
 def deploy_model(args):
-    """Deploy the DeepSeek r1 671B model with Ray Serve."""
+    """Deploy the DeepSeek r1 INT8 model with Ray Serve."""
     # Initialize Ray cluster
     init_ray_cluster(args.ray_address)
     
@@ -283,9 +320,9 @@ def deploy_model(args):
     )
     
     # Deploy
-    serve.run(model_deployment, name="deepseek_r1_671b")
+    serve.run(model_deployment, name="deepseek_r1_int8")
     
-    logger.info(f"DeepSeek r1 671B model deployed successfully")
+    logger.info(f"DeepSeek r1 INT8 model deployed successfully")
     logger.info(f"API is available at: http://{args.host}:{args.port}")
     logger.info("Example API usage (POST request):")
     logger.info("""
