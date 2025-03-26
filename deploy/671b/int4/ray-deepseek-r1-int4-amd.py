@@ -336,7 +336,8 @@ try:
 
     # 部署模型服务
     print_info(f"正在部署 {args.app_name}...")
-    DeepSeekInt4AMD.deploy()
+    # 使用新版Ray Serve API部署服务
+    serve.run(DeepSeekInt4AMD.bind(), name=args.app_name)
     print_success(f"模型服务 {args.app_name} 部署成功")
     
     # 打印服务URL
