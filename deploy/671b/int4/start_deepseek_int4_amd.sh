@@ -22,6 +22,7 @@ NUM_GPUS="auto"  # 自动获取所有可用GPU
 PORT=8000
 RAY_ADDRESS="auto"  # 默认自动连接已有集群
 TENSOR_PARALLEL_SIZE=16  # 默认使用16卡张量并行
+FORCE_CPU=false  # 默认不强制使用CPU运行
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -40,6 +41,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --debug)
       DEBUG=true
+      shift
+      ;;
+    --force-cpu)
+      FORCE_CPU=true
       shift
       ;;
     --num-gpus)
@@ -65,6 +70,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --app-name <名称>                应用名称 (默认: deepseek_r1_int4_amd)"
       echo "  --no-shutdown                    不关闭已有部署"
       echo "  --debug                          启用调试模式"
+      echo "  --force-cpu                      强制使用CPU运行，即使没有检测到GPU"
       echo "  --num-gpus <数量|auto>           每个副本使用的GPU数量 (默认: auto，自动获取所有可用GPU)"
       echo "  --port <端口>                    服务端口 (默认: 8000)"
       echo "  --ray-address <地址:端口>        Ray集群地址 (默认: auto，自动连接)"
@@ -94,6 +100,11 @@ if [ "$NO_SHUTDOWN" = true ]; then
   echo -e "${BLUE}- 保留已有部署: 是${NC}"
 else
   echo -e "${BLUE}- 保留已有部署: 否${NC}"
+fi
+if [ "$FORCE_CPU" = true ]; then
+  echo -e "${BLUE}- 强制CPU模式: 已启用${NC}"
+  echo -e "${YELLOW}警告: 强制CPU模式已启用，将尝试在没有GPU的情况下运行模型${NC}"
+  echo -e "${YELLOW}注意: 这可能导致性能严重下降，仅用于测试目的${NC}"
 fi
 
 # 检查张量并行度参数
@@ -126,6 +137,10 @@ fi
 if [ "$DEBUG" = true ]; then
   PYTHON_ARGS="${PYTHON_ARGS} --debug"
 fi
+if [ "$FORCE_CPU" = true ]; then
+  PYTHON_ARGS="${PYTHON_ARGS} --force-cpu"
+  echo -e "${YELLOW}将添加 --force-cpu 参数强制使用CPU运行${NC}"
+fi
 
 # 检查模型目录
 if [ ! -d "${MODEL_PATH}" ]; then
@@ -155,9 +170,27 @@ python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path "${MODEL_PATH}" 
 PYTHON_EXIT_CODE=$?
 set -e
 
+# 处理特定的错误情况
 if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+  # 通用错误信息
   echo -e "${RED}错误: Python脚本执行失败，退出代码: ${PYTHON_EXIT_CODE}${NC}"
-  echo -e "${YELLOW}请检查Ray集群配置和Python环境${NC}"
+  
+  # 收集日志输出以检查特定错误
+  LAST_LOG=$(python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path "${MODEL_PATH}" --app-name "${APP_NAME}" --port "${PORT}" --num-gpus "${NUM_GPUS}" --ray-address "${RAY_ADDRESS}" --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" ${PYTHON_ARGS} 2>&1 | grep -i "检测不到GPU" || echo "")
+  
+  # 检查是否是GPU检测错误
+  if echo "$LAST_LOG" | grep -q "检测不到GPU"; then
+    echo -e "${RED}错误: 检测不到GPU。${NC}"
+    echo -e "${YELLOW}可能的解决方案:${NC}"
+    echo -e "${YELLOW}1. 确保系统已正确安装GPU驱动${NC}"
+    echo -e "${YELLOW}2. 检查ROCm环境是否正确配置${NC}"
+    echo -e "${YELLOW}3. 确认PyTorch是否为AMD兼容版本${NC}"
+    echo -e "${YELLOW}4. 使用 --force-cpu 参数尝试在CPU上运行（仅用于测试）${NC}"
+    echo -e "${YELLOW}5. 使用 --ray-address 参数连接到已有的、有GPU资源的Ray集群${NC}"
+  else
+    echo -e "${YELLOW}请检查Ray集群配置和Python环境${NC}"
+  fi
+  
   exit $PYTHON_EXIT_CODE
 fi
 
