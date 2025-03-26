@@ -14,7 +14,7 @@ echo -e "${GREEN}启动 DeepSeek-R1-Int4-AWQ 模型服务 (跨机器分布式部
 echo -e "${BLUE}============================================${NC}"
 
 # 默认参数
-MODEL_PATH="/data/models/DeepSeek-Coder-R1-v1.5-Int4-AWQ"
+MODEL_PATH="/home/models/DeepSeek-R1-Int4-AWQ"
 APP_NAME="deepseek_r1_int4_amd"
 NO_SHUTDOWN=false
 DEBUG=false
@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --help)
       echo "使用方法: $0 [选项]"
       echo "选项:"
-      echo "  --model-path <路径>              模型路径 (默认: /data/models/DeepSeek-Coder-R1-v1.5-Int4-AWQ)"
+      echo "  --model-path <路径>              模型路径 (默认: /home/models/DeepSeek-R1-Int4-AWQ)"
       echo "  --app-name <名称>                应用名称 (默认: deepseek_r1_int4_amd)"
       echo "  --no-shutdown                    不关闭已有部署"
       echo "  --debug                          启用调试模式"
@@ -108,18 +108,30 @@ if [ -z "${ROCM_PATH}" ]; then
   echo -e "${YELLOW}提示: 建议设置 export ROCM_PATH=/opt/rocm${NC}"
 fi
 
-# 检查是否有AMD GPU
-if ! command -v rocm-smi &> /dev/null; then
-  echo -e "${YELLOW}警告: 未找到rocm-smi命令，无法验证AMD GPU状态${NC}"
-  echo -e "${YELLOW}提示: 请确保ROCm环境正确安装${NC}"
-else
-  echo -e "${BLUE}检查AMD GPU状态...${NC}"
-  # 使用正确的参数检测GPU数量
-  GPU_COUNT=$(rocm-smi | grep -c "GPU")
-  echo -e "${GREEN}检测到 ${GPU_COUNT} 个本地GPU${NC}"
-  # 显示内存信息
-  rocm-smi --showmeminfo || echo -e "${YELLOW}警告: 无法显示GPU内存信息${NC}"
+# 暂时禁用立即退出，以便处理命令可能的错误
+set +e
+
+# 检查Ray集群状态和GPU可用性
+echo -e "${BLUE}检查Ray集群和GPU状态...${NC}"
+ray status 2>/dev/null
+RAY_STATUS_CODE=$?
+
+if [ $RAY_STATUS_CODE -ne 0 ]; then
+  echo -e "${YELLOW}警告: Ray集群状态检查失败，可能需要启动Ray集群${NC}"
+  echo -e "${YELLOW}提示: 如果尚未启动Ray集群，请先运行 'ray start --head'${NC}"
 fi
+
+# 使用hy-smi检查GPU状态（如果有）
+if command -v hy-smi &> /dev/null; then
+  echo -e "${BLUE}检查GPU状态(hy-smi)...${NC}"
+  hy-smi 2>/dev/null || echo -e "${YELLOW}警告: 无法获取GPU信息${NC}"
+else
+  echo -e "${YELLOW}警告: 未找到hy-smi命令，无法详细验证GPU状态${NC}"
+  echo -e "${YELLOW}提示: 请确保HabanaAI环境正确安装${NC}"
+fi
+
+# 恢复立即退出设置
+set -e
 
 # 构建Python命令行参数
 PYTHON_ARGS=""
@@ -151,7 +163,18 @@ echo -e "${GREEN}使用${TENSOR_PARALLEL_SIZE}张GPU进行分布式推理${NC}"
 
 # 执行Python脚本
 echo -e "${BLUE}执行命令: python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path ${MODEL_PATH} --app-name ${APP_NAME} --port ${PORT} --num-gpus ${NUM_GPUS} --ray-address ${RAY_ADDRESS} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} ${PYTHON_ARGS}${NC}"
+
+# 暂时禁用立即退出，以便处理Python脚本可能的错误
+set +e
 python $(dirname "$0")/ray-deepseek-r1-int4-amd.py --model-path "${MODEL_PATH}" --app-name "${APP_NAME}" --port "${PORT}" --num-gpus "${NUM_GPUS}" --ray-address "${RAY_ADDRESS}" --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" ${PYTHON_ARGS}
+PYTHON_EXIT_CODE=$?
+set -e
+
+if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+  echo -e "${RED}错误: Python脚本执行失败，退出代码: ${PYTHON_EXIT_CODE}${NC}"
+  echo -e "${YELLOW}请检查Ray集群配置和Python环境${NC}"
+  exit $PYTHON_EXIT_CODE
+fi
 
 echo -e "${GREEN}启动命令已执行${NC}"
 echo -e "${BLUE}============================================${NC}"
