@@ -173,10 +173,10 @@ try:
         except:
             available_gpus = 0
             
+        # 移除worker_group资源指定
         if args.tensor_parallel_size > available_gpus:
-            deployment_kwargs["ray_actor_options"].update({
-                "resources": {"worker_group": 1},  # 帮助Ray在多个节点上分配资源
-            })
+            print_info(f"张量并行度({args.tensor_parallel_size})大于可用GPU数量({available_gpus})，分布式模式已启用")
+            # 不再指定worker_group资源
 
     @serve.deployment(**deployment_kwargs)
     class DeepSeekInt4AMD:
