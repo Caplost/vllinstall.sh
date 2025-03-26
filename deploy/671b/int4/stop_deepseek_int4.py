@@ -29,7 +29,7 @@ def print_success(text):
 
 # 解析命令行参数
 parser = argparse.ArgumentParser(description="Stop DeepSeek-R1-Int4-AWQ service")
-parser.add_argument("--app-name", type=str, default="deepseek_r1_int4", help="Application name to stop")
+parser.add_argument("--app-name", type=str, default="deepseek_r1_int4_amd", help="Application name to stop")
 args = parser.parse_args()
 
 print_info("==== 停止 DeepSeek-R1-Int4-AWQ 服务 ====")
