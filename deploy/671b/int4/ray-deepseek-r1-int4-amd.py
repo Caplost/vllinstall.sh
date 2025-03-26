@@ -48,6 +48,39 @@ def print_success(text):
     print_colored(text, GREEN)
     logger.info(text)
 
+def check_model_directory(model_path):
+    """检查模型目录结构，返回关键文件列表"""
+    try:
+        if not os.path.exists(model_path):
+            return f"路径不存在: {model_path}"
+        
+        if not os.path.isdir(model_path):
+            return f"不是目录: {model_path}"
+        
+        # 收集目录中的文件
+        files = os.listdir(model_path)
+        key_files = []
+        
+        # 检查关键文件
+        if "config.json" in files:
+            key_files.append("config.json")
+        if "tokenizer.json" in files or "tokenizer_config.json" in files:
+            key_files.append("tokenizer_config")
+        
+        # 检查模型文件
+        model_files = [f for f in files if f.endswith(".safetensors") or f.endswith(".bin")]
+        if model_files:
+            key_files.append(f"模型文件: {len(model_files)}个")
+        
+        # 检查量化文件
+        awq_files = [f for f in files if "awq" in f.lower()]
+        if awq_files:
+            key_files.append(f"AWQ文件: {len(awq_files)}个")
+            
+        return f"目录结构正常, 关键文件: {', '.join(key_files)}"
+    except Exception as e:
+        return f"检查目录时出错: {str(e)}"
+
 # 解析命令行参数
 parser = argparse.ArgumentParser(description="Deploy DeepSeek-R1-Int4-AWQ model with Ray Serve on AMD GPU")
 parser.add_argument("--model-path", type=str, required=True, help="Path to the model directory")
@@ -230,6 +263,10 @@ try:
                 print_info(f"设备: {self.device} ({self.device_type})")
                 print_info(f"最大并发请求数: {self.max_concurrent_queries}")
                 
+                # 检查模型目录结构
+                model_dir_status = check_model_directory(self.model_path)
+                print_info(f"模型目录检查: {model_dir_status}")
+                
                 # 配置张量并行参数
                 tp_size = args.tensor_parallel_size
                 print_info(f"设置张量并行度: {tp_size}")
@@ -264,7 +301,22 @@ try:
                         "gpu_memory_utilization": 0.85,  # AMD GPU通常需要更保守的内存设置
                         "enforce_eager": True,       # 对AMD GPU更重要
                         "trust_remote_code": True,   # 确保加载自定义代码
+                        "tokenizer": None,           # 允许自动检测tokenizer
+                        "tokenizer_mode": "auto",    # 自动选择tokenizer模式
+                        "seed": 42,                  # 设置随机种子以确保一致性
+                        "download_dir": None,        # 允许自动下载模型文件
+                        "load_format": "auto",       # 自动检测模型格式
                     })
+                    
+                    # 添加DeepSeek模型特定参数
+                    if "deepseek" in self.model_path.lower():
+                        print_info("检测到DeepSeek模型，应用特定优化")
+                        load_kwargs.update({
+                            "model_type": "deepseek",    # 明确指定模型类型
+                            "revision": "main",          # 使用主分支
+                            "tokenizer_revision": "main",# 使用主分支的tokenizer
+                            "disable_custom_all_reduce": True,  # 在某些环境中可能需要禁用自定义all_reduce
+                        })
                 
                 # 加载模型 (适用于大规模分布式部署)
                 # 根据设备类型选择适当的加载参数
@@ -272,17 +324,78 @@ try:
                     "model": self.model_path,
                     "tensor_parallel_size": tp_size,
                     "dtype": "auto",
+                    "trust_remote_code": True,  # 确保这个参数在顶层设置
                 }
                 # 合并所有加载参数
                 load_args.update(load_kwargs)
                 
-                # 实际加载模型
-                print_info(f"使用以下配置加载模型: {', '.join([f'{k}={v}' for k, v in load_args.items() if k != 'model'])}")
-                self.model = LLM(**load_args)
+                # 添加额外的参数以支持自定义模型
+                extra_params = {
+                    "revision": "main",  # 尝试使用主分支
+                    "download_dir": None,  # 允许自动下载
+                    "load_format": "auto",  # 自动检测模型格式
+                    "trust_remote_code": True,  # 再次确保这个参数设置正确
+                }
+                load_args.update(extra_params)
                 
-                print_success(f"模型加载成功：{self.model_path}")
-                print_success(f"使用张量并行度: {tp_size}，跨机器分布式推理启用")
-                self.model_loaded = True
+                # 实际加载模型
+                try:
+                    print_info(f"使用以下配置加载模型: {', '.join([f'{k}={v}' for k, v in load_args.items() if k != 'model'])}")
+                    self.model = LLM(**load_args)
+                    print_success(f"模型加载成功：{self.model_path}")
+                    print_success(f"使用张量并行度: {tp_size}，跨机器分布式推理启用")
+                    self.model_loaded = True
+                except Exception as e:
+                    import traceback
+                    error_details = traceback.format_exc()
+                    print_error(f"加载模型时出错: {str(e)}")
+                    print_error(f"详细错误信息: {error_details}")
+                    print_warning("尝试以不同方式加载模型...")
+                    
+                    try:
+                        # 尝试使用更严格的参数加载
+                        strict_load_args = {
+                            "model": self.model_path,
+                            "tensor_parallel_size": tp_size,
+                            "dtype": "auto",
+                            "trust_remote_code": True,
+                            "device": "auto",
+                            "revision": "main",
+                            "tokenizer_revision": "main",
+                            "quantization": "awq" if args.distributed else None,
+                            "seed": 42,
+                        }
+                        print_info("使用严格参数重新尝试加载...")
+                        self.model = LLM(**strict_load_args)
+                        print_success(f"使用严格参数模型加载成功：{self.model_path}")
+                        print_success(f"使用张量并行度: {tp_size}")
+                        self.model_loaded = True
+                    except Exception as retry_error:
+                        print_error(f"重试加载模型时出错: {str(retry_error)}")
+                        print_warning("尝试最后的备选方案...")
+                        
+                        try:
+                            # 如果模型路径看起来像Hugging Face ID，尝试直接从Hugging Face加载
+                            if os.path.isdir(self.model_path) and not self.model_path.startswith(("/", ".")):
+                                print_info(f"尝试将 {self.model_path} 视为Hugging Face模型ID直接加载")
+                            
+                            # 尝试最小化参数加载
+                            minimal_args = {
+                                "model": self.model_path,
+                                "trust_remote_code": True,
+                                "tensor_parallel_size": 1 if tp_size > 4 else tp_size,  # 减少张量并行度
+                                "dtype": "half",  # 使用半精度
+                                "max_model_len": 8192,  # 减少上下文长度
+                                "quantization": None,  # 禁用量化
+                            }
+                            
+                            print_info("使用最小化参数尝试加载...")
+                            self.model = LLM(**minimal_args)
+                            print_success(f"使用最小化参数成功加载模型：{self.model_path}")
+                            self.model_loaded = True
+                        except Exception as last_error:
+                            print_error(f"所有加载尝试均失败: {str(last_error)}")
+                            self.model_loaded = False
             except Exception as e:
                 print_error(f"加载模型时出错: {str(e)}")
                 # 设置标志以便后续请求知道模型未加载
