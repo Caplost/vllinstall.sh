@@ -23,3 +23,7 @@ ray start --address='172.16.254.109:6379' --num-gpus=8
 
 
 pip install --upgrade vllm -i https://mirrors.aliyun.com/pypi/simple
+
+
+
+vllm serve /home/models/DeepSeek-R1-Int4-AWQ --trust-remote-code --dtype float16 --max-model-len 18000 -tp 8 -q moe_wna16 --gpu-memory-utilization 0.97

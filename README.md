@@ -1,151 +1,142 @@
-# DeepSeek R1 INT8 Model Deployment
+# DeepSeek AWQ Inference Script
 
-This repository contains a Python script for deploying the DeepSeek R1 INT8 quantized model on an existing Ray cluster with tensor parallelism across multiple GPUs.
-
-## Overview
-
-The `deploy_deepseek_r1_int8.py` script simplifies deploying DeepSeek's R1 INT8 model by:
-
-- Connecting to your existing Ray cluster
-- Installing all required dependencies
-- Handling multiple import patterns for DeepSeek modules
-- Setting up tensor parallelism across 16 GPUs
-- Deploying a REST API service with Ray Serve
+This script simplifies running DeepSeek V3 or R1 models with AWQ-INT4 precision on a single machine with 8 GPUs.
 
 ## Requirements
 
-- Python 3.8+
-- Existing Ray cluster with 16 GPUs (64GB VRAM each)
-- DeepSeek R1 INT8 model files in `/home/models/DeepSeek-R1-Channel-INT8` (or specified path)
+- Python 3.6+
+- vllm with DeepSeek support
+- 8 GPUs (e.g., K100AI, BW)
+- DeepSeek V3 or R1 model with AWQ-INT4 quantization
 
-## Quick Start
+## Usage
 
-```bash
-# Deploy with default settings
-python deploy_deepseek_r1_int8.py
+### Option 1: Using the Shell Script (Recommended)
 
-# Deploy with dependency installation
-python deploy_deepseek_r1_int8.py --install_deps
-
-# Deploy with custom model path
-python deploy_deepseek_r1_int8.py --model_path /path/to/model --install_deps
-
-# Run diagnostics before deployment
-python deploy_deepseek_r1_int8.py --debug --install_deps
-```
-
-## Usage Options
-
-```
-usage: deploy_deepseek_r1_int8.py [-h] [--model_path MODEL_PATH] [--tensor_parallel_size TENSOR_PARALLEL_SIZE]
-                                  [--host HOST] [--port PORT] [--max_batch_size MAX_BATCH_SIZE]
-                                  [--max_input_length MAX_INPUT_LENGTH] [--max_output_length MAX_OUTPUT_LENGTH]
-                                  [--ray_address RAY_ADDRESS] [--install_deps] [--cache_dir CACHE_DIR] [--debug]
-```
-
-### Model Arguments
-
-- `--model_path`: Path to the DeepSeek R1 INT8 model (default: `/home/models/DeepSeek-R1-Channel-INT8`)
-- `--tensor_parallel_size`: Number of GPUs to use for tensor parallelism (default: 16)
-
-### Server Arguments
-
-- `--host`: Host to bind the server to (default: `0.0.0.0`)
-- `--port`: Port to bind the server to (default: 8000)
-
-### Generation Arguments
-
-- `--max_batch_size`: Maximum batch size for inference (default: 32)
-- `--max_input_length`: Maximum input sequence length (default: 4096)
-- `--max_output_length`: Maximum output sequence length (default: 4096)
-
-### Ray Cluster Arguments
-
-- `--ray_address`: Ray cluster address to connect to (default: "auto")
-
-### Other Arguments
-
-- `--install_deps`: Install dependencies before deployment
-- `--cache_dir`: Directory to cache model weights
-- `--debug`: Enable debug mode with detailed diagnostics
-
-## Connecting to a Specific Ray Cluster
-
-If your Ray cluster is running at a specific address, you can specify it:
+Make both scripts executable:
 
 ```bash
-python deploy_deepseek_r1_int8.py --ray_address "ray://192.168.1.100:10001"
+chmod +x run_deepseek.sh run_deepseek_awq.py
 ```
 
-## Making API Requests
-
-After deployment, you can interact with the model through the REST API:
+#### Benchmark Mode
 
 ```bash
-# Basic request
-curl -X POST http://localhost:8000 \
-     -H "Content-Type: application/json" \
-     -d '{"prompt": "Once upon a time", "max_new_tokens": 512, "temperature": 0.7}'
-
-# Custom generation parameters
-curl -X POST http://localhost:8000 \
-     -H "Content-Type: application/json" \
-     -d '{
-           "prompt": "Write a short story about AI",
-           "max_new_tokens": 1024,
-           "temperature": 0.8,
-           "top_p": 0.95,
-           "top_k": 50,
-           "repetition_penalty": 1.2
-         }'
+./run_deepseek.sh --model /path/to/DeepSeek-V3-AWQ --benchmark
 ```
 
-## API Response Format
+#### Server Mode
 
-```json
-{
-  "generated_text": "... generated text here ...",
-  "input_tokens": 10,
-  "generated_tokens": 512,
-  "generation_time": 5.2,
-  "tokens_per_second": 98.5
-}
+Basic server:
+```bash
+./run_deepseek.sh --model /path/to/DeepSeek-V3-AWQ --server --port 8000
 ```
 
-## Troubleshooting
+Server with reasoning capabilities:
+```bash
+./run_deepseek.sh --model /path/to/DeepSeek-R1-AWQ --server --enable-reasoning --reasoning-parser default --max-num-seqs 30
+```
 
-### Missing Dependencies
+#### Additional Shell Script Options
 
-If you encounter errors related to missing packages, use the `--install_deps` flag:
+```
+Options:
+  -m, --model PATH        Path to the DeepSeek model (required)
+  -b, --benchmark         Run in benchmark mode
+  -s, --server            Run in server mode
+  -l, --max-len LENGTH    Max model context length (default: 18000)
+  -p, --port PORT         Server port (default: 8000, server mode only)
+  -np, --num-prompts NUM  Number of prompts for benchmark (default: 1)
+  -il, --input-len LEN    Input length for benchmark (default: 2)
+  -ol, --output-len LEN   Output length for benchmark (default: 128)
+  -tp, --tp-size SIZE     Tensor parallel size (default: 8)
+  -g, --gpu-util FACTOR   GPU memory utilization (default: 0.97)
+  --enable-reasoning      Enable reasoning capabilities (server mode only)
+  --reasoning-parser TYPE Specify reasoning parser type (requires --enable-reasoning)
+  --max-num-seqs NUM      Maximum number of sequences (server mode only)
+  -h, --help              Display this help message
+```
+
+### Option 2: Using the Python Script Directly
+
+Make the Python script executable:
 
 ```bash
-python deploy_deepseek_r1_int8.py --install_deps
+chmod +x run_deepseek_awq.py
 ```
 
-### DeepSeek Module Import Issues
+#### Running Benchmark
 
-The script tries multiple import patterns for DeepSeek modules. If you still encounter issues, check:
+To test the model's throughput performance:
 
 ```bash
-python deploy_deepseek_r1_int8.py --debug
+./run_deepseek_awq.py \
+  --mode benchmark \
+  --model-path /path/to/DeepSeek-V3-AWQ \
+  --num-prompts 1 \
+  --input-len 2 \
+  --output-len 128 \
+  --max-model-len 12800
 ```
 
-### Insufficient GPU Resources
+#### Running Server
 
-If your Ray cluster has fewer than 16 GPUs, the script will warn you and ask if you want to continue.
-
-### Checking Ray Cluster Status
-
-Use Ray's built-in tools to check your cluster status:
-
+Basic server:
 ```bash
-ray status
+./run_deepseek_awq.py \
+  --mode server \
+  --model-path /path/to/DeepSeek-V3-AWQ \
+  --max-model-len 18000 \
+  --port 8000
 ```
 
-## Advanced Configuration
+Server with reasoning capabilities:
+```bash
+./run_deepseek_awq.py \
+  --mode server \
+  --model-path /path/to/DeepSeek-R1-Int4-AWQ \
+  --max-model-len 13000 \
+  --tensor-parallel-size 8 \
+  --enable-reasoning \
+  --reasoning-parser default \
+  --max-num-seqs 30
+```
 
-For advanced customization, you can modify the `model_deployment.py` file that's generated by the script. This file contains the Ray Serve deployment class and model loading logic.
+## Python Script Parameters
 
-## License
+### Common Parameters
 
-This deployment script is provided as-is. The DeepSeek model is subject to its own license terms. 
+- `--model-path`: Path to the DeepSeek model (DeepSeek-V3-AWQ or DeepSeek-R1-AWQ)
+- `--mode`: Run mode, either `benchmark` or `server`
+- `--tensor-parallel-size`: Tensor parallel size (default: 8)
+- `--max-model-len`: Maximum model context length (default: 18000)
+- `--gpu-memory-utilization`: GPU memory utilization factor (default: 0.97)
+
+### Benchmark Mode Parameters
+
+- `--num-prompts`: Number of prompts for benchmark testing (default: 1)
+- `--input-len`: Input length for benchmark testing (default: 2)
+- `--output-len`: Output length for benchmark testing (default: 128)
+
+### Server Mode Parameters
+
+- `--port`: Port for the vllm server (optional)
+- `--enable-reasoning`: Enable reasoning capabilities (flag without value)
+- `--reasoning-parser`: Specify the reasoning parser to use (requires `--enable-reasoning`)
+- `--max-num-seqs`: Maximum number of sequences for inference
+
+## Environment Variables
+
+The script automatically sets the following environment variables:
+
+- `HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+- `VLLM_MLA_DISABLE=1`
+- `ALLREDUCE_STREAM_WITH_COMPUTE=1`
+- `NCCL_MIN_NCHANNELS=16`
+- `NCCL_MAX_NCHANNELS=16`
+
+## Notes
+
+- For K100AI and BW GPUs with 8 cards, the maximum supported context length is 18k tokens.
+- Script ensures all required environment variables are set correctly.
+- The `--reasoning-parser` flag requires a value whenever used with `--enable-reasoning`. 
